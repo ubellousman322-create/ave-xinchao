@@ -69,7 +69,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 9);
+  assert.equal(state.schemaVersion, 10);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -285,7 +285,7 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 9);
+  assert.equal(settled.state.schemaVersion, 10);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.deepEqual(settled.state.recentDriveChanges, []);
   assert.equal(settled.changed, true);
@@ -366,17 +366,46 @@ test('old states keep existing drives and receive only missing ave dimensions', 
   assert.equal(settled.state.drives.possess, 0.73);
   assert.equal(settled.state.drives.hurt, 0.03);
   assert.equal(settled.state.drives.security, 0.55);
-  assert.equal(settled.state.schemaVersion, 9);
+  assert.equal(settled.state.schemaVersion, 10);
 });
 
-test('emotions decay toward their own baselines instead of growing like needs', () => {
+test('legacy effective emotion values migrate losslessly into the persistent mood layer', () => {
+  const now = new Date('2026-07-29T00:00:00Z');
+  const old = newState(now);
+  delete old.emotions;
+  old.schemaVersion = 9;
+  old.drives.anger = 0.50;
+  old.drives.hurt = 0.40;
+  old.drives.security = 0.80;
+  const migrated = settleState(old, now, 90).state;
+  assert.equal(migrated.drives.anger, 0.50);
+  assert.equal(migrated.drives.hurt, 0.40);
+  assert.equal(migrated.drives.security, 0.80);
+  assert.equal(migrated.emotions.anger.mood, 0.48);
+  assert.equal(migrated.emotions.anger.pulse, 0);
+  assert.equal(migrated.schemaVersion, 10);
+});
+
+test('pulse and mood decay by their configured half-lives', () => {
   const start = new Date('2026-07-29T00:00:00Z');
-  const state = newState(start);
-  state.drives.anger = 0.50;
-  state.drives.hurt = 0.40;
-  state.drives.security = 0.80;
-  const settled = settleState(state, new Date('2026-07-29T10:00:00Z'), 90).state;
-  assert.equal(settled.drives.anger, 0.20);
-  assert.equal(settled.drives.hurt, 0.26);
-  assert.equal(settled.drives.security, 0.77);
+  const state = applyDriveFeedback(newState(start), { anger: 0.18 }, start);
+  const initialPulse = state.emotions.anger.pulse;
+  const initialMood = state.emotions.anger.mood;
+  const afterPulseHalfLife = settleState(
+    state,
+    new Date(start.getTime() + 0.65 * 3_600_000),
+    90,
+  ).state;
+  assert.ok(Math.abs(afterPulseHalfLife.emotions.anger.pulse - initialPulse / 2) <= 0.0001);
+  assert.ok(afterPulseHalfLife.emotions.anger.mood > initialMood * 0.95);
+
+  const moodOnly = structuredClone(state);
+  moodOnly.emotions.anger.pulse = 0;
+  moodOnly.drives.anger = 0.02 + moodOnly.emotions.anger.mood;
+  const afterMoodHalfLife = settleState(
+    moodOnly,
+    new Date(start.getTime() + 10 * 3_600_000),
+    90,
+  ).state;
+  assert.ok(Math.abs(afterMoodHalfLife.emotions.anger.mood - initialMood / 2) <= 0.0001);
 });

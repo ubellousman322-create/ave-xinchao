@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { breathDreamContext, pickIntent } from './engine.js';
+import { breathDreamContext, emotionBreakdown, pickIntent } from './engine.js';
 import { DIMENSIONS } from './dimensions.js';
 import { renderHandoffNotes } from './handoff-notes.js';
 
@@ -106,6 +106,23 @@ export function composeStateSummary(state, now = new Date()) {
   const candidates = Object.entries(state.drives ?? {}).map(([key, rawValue]) => {
     const value = Number(rawValue);
     const delta = Number(changes[key] ?? 0);
+    const breakdown = emotionBreakdown(state, key);
+    const pulseMagnitude = Math.abs(Number(breakdown?.pulse ?? 0));
+    const moodMagnitude = Math.abs(Number(breakdown?.mood ?? 0));
+    let layer = null;
+    let trend = null;
+    if (breakdown) {
+      if (pulseMagnitude > moodMagnitude * 1.5) {
+        layer = 'pulse';
+        trend = '瞬时为主，较快回落';
+      } else if (moodMagnitude > pulseMagnitude * 1.5) {
+        layer = 'mood';
+        trend = '持续为主，缓慢回落';
+      } else {
+        layer = 'mixed';
+        trend = '瞬时与持续共同影响';
+      }
+    }
     return {
       key,
       label: DIMENSIONS[key]?.label ?? key,
@@ -113,6 +130,10 @@ export function composeStateSummary(state, now = new Date()) {
       value: Number(value.toFixed(3)),
       delta: Number(delta.toFixed(3)),
       score: Number(stateScore(key, value, delta).toFixed(4)),
+      layer,
+      trend,
+      pulse: breakdown ? Number(breakdown.pulse.toFixed(3)) : null,
+      mood: breakdown ? Number(breakdown.mood.toFixed(3)) : null,
     };
   }).filter((item) => item.score >= 0.08)
     .sort((left, right) => right.score - left.score || left.key.localeCompare(right.key));
@@ -149,7 +170,10 @@ function dynamicSection(state, sessionId, now) {
 }
 
 function renderDynamic(value) {
-  const formatState = (item) => `${item.label}=${item.value.toFixed(3)}`;
+  const formatState = (item) => {
+    if (!item.layer) return `${item.label}=${item.value.toFixed(3)}`;
+    return `${item.label}=${item.value.toFixed(3)}（持续${item.mood >= 0 ? '+' : ''}${item.mood.toFixed(3)}，瞬时${item.pulse >= 0 ? '+' : ''}${item.pulse.toFixed(3)}；${item.trend}）`;
+  };
   const intent = value.summary.intent;
   const parts = [
     `意识=${value.consciousness}`,

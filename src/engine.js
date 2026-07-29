@@ -7,6 +7,65 @@ const iso = (value) => new Date(value).toISOString();
 const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired']);
 const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
 const MAX_RECENT_CONVERSATION_EVENTS = 256;
+export const EMOTION_KEYS = Object.freeze(
+  DRIVE_KEYS.filter((key) => DIMENSIONS[key].group?.startsWith('emotion_')),
+);
+
+function isEmotion(key) {
+  return EMOTION_KEYS.includes(key);
+}
+
+function effectiveEmotion(state, key) {
+  const dim = DIMENSIONS[key];
+  const baseline = Number(dim.baseline ?? 0);
+  const mood = Number(state.emotions?.[key]?.mood ?? 0);
+  const pulse = Number(state.emotions?.[key]?.pulse ?? 0);
+  return Number(clamp(baseline + mood + pulse).toFixed(4));
+}
+
+function syncEffectiveEmotions(state) {
+  for (const key of EMOTION_KEYS) state.drives[key] = effectiveEmotion(state, key);
+}
+
+function addEmotionImpulse(state, key, amount) {
+  if (!isEmotion(key) || !Number.isFinite(Number(amount))) return;
+  const dim = DIMENSIONS[key];
+  const settleRatio = clamp(Number(dim.settleRatio ?? 0.25), 0, 0.8);
+  const total = Number(amount);
+  state.emotions[key].mood = Number(clamp(
+    Number(state.emotions[key].mood) + total * settleRatio,
+    -1,
+    1,
+  ).toFixed(4));
+  state.emotions[key].pulse = Number(clamp(
+    Number(state.emotions[key].pulse) + total * (1 - settleRatio),
+    -1,
+    1,
+  ).toFixed(4));
+  state.drives[key] = effectiveEmotion(state, key);
+}
+
+function relieveEmotion(state, key, ratio) {
+  if (!isEmotion(key)) return;
+  const multiplier = 1 - clamp(Number(ratio), 0, 0.95);
+  state.emotions[key].pulse = Number((Number(state.emotions[key].pulse) * multiplier).toFixed(4));
+  state.emotions[key].mood = Number((Number(state.emotions[key].mood) * multiplier).toFixed(4));
+  state.drives[key] = effectiveEmotion(state, key);
+}
+
+export function emotionBreakdown(state, key) {
+  if (!isEmotion(key)) return null;
+  const dim = DIMENSIONS[key];
+  return {
+    key,
+    baseline: Number(dim.baseline ?? 0),
+    mood: Number(state.emotions?.[key]?.mood ?? 0),
+    pulse: Number(state.emotions?.[key]?.pulse ?? 0),
+    effective: effectiveEmotion(state, key),
+    pulseHalfLifeHours: Number(dim.pulseHalfLifeHours),
+    moodHalfLifeHours: Number(dim.moodHalfLifeHours),
+  };
+}
 
 export const INTERACTION_TYPES = Object.freeze([
   'companionship',
@@ -104,6 +163,19 @@ function ensureStateShape(state) {
       state.drives[key] = Number(DIMENSIONS[key].initialValue ?? 0.15);
     }
   }
+  state.emotions ??= {};
+  for (const key of EMOTION_KEYS) {
+    const dim = DIMENSIONS[key];
+    const previousEffective = Number(state.drives[key] ?? dim.initialValue ?? dim.baseline ?? 0);
+    const layer = state.emotions[key] ?? {};
+    state.emotions[key] = {
+      mood: Number.isFinite(Number(layer.mood))
+        ? Number(layer.mood)
+        : Number((previousEffective - Number(dim.baseline ?? 0)).toFixed(4)),
+      pulse: Number.isFinite(Number(layer.pulse)) ? Number(layer.pulse) : 0,
+    };
+  }
+  syncEffectiveEmotions(state);
   state.sessionOverlays ??= {};
   state.contextDeliveries ??= {};
   state.recentConversationEvents = Array.isArray(state.recentConversationEvents)
@@ -114,7 +186,7 @@ function ensureStateShape(state) {
     ? state.recentDriveChanges.slice(-32)
     : [];
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
-  state.schemaVersion = Math.max(9, Number(state.schemaVersion) || 0);
+  state.schemaVersion = Math.max(10, Number(state.schemaVersion) || 0);
   return state;
 }
 
@@ -245,25 +317,32 @@ function applyInteractionOutcomes(state, tags, now, options = {}) {
       if (!DRIVE_KEYS.includes(key)) continue;
       const current = Number(state.drives[key] ?? 0);
       const ratio = clamp(Number(relief) * strength, 0, 0.35);
-      state.drives[key] = Number(clamp(current * (1 - ratio)).toFixed(4));
+      if (isEmotion(key)) relieveEmotion(state, key, ratio);
+      else state.drives[key] = Number(clamp(current * (1 - ratio)).toFixed(4));
       affected.add(key);
     }
     for (const [key, increase] of Object.entries(effect.increase ?? {})) {
       if (!DRIVE_KEYS.includes(key)) continue;
       const current = Number(state.drives[key] ?? 0);
-      state.drives[key] = Number(clamp(current + clamp(Number(increase) * strength, 0, 0.12)).toFixed(4));
+      const amount = clamp(Number(increase) * strength, 0, 0.12);
+      if (isEmotion(key)) addEmotionImpulse(state, key, amount);
+      else state.drives[key] = Number(clamp(current + amount).toFixed(4));
       affected.add(key);
     }
     for (const [key, decrease] of Object.entries(effect.decrease ?? {})) {
       if (!DRIVE_KEYS.includes(key)) continue;
       const current = Number(state.drives[key] ?? 0);
-      state.drives[key] = Number(clamp(current - clamp(Number(decrease) * strength, 0, 0.12)).toFixed(4));
+      const amount = clamp(Number(decrease) * strength, 0, 0.12);
+      if (isEmotion(key)) addEmotionImpulse(state, key, -amount);
+      else state.drives[key] = Number(clamp(current - amount).toFixed(4));
       affected.add(key);
     }
     for (const [key, boost] of Object.entries(effect.boost ?? {})) {
       if (!DRIVE_KEYS.includes(key)) continue;
       const current = Number(state.drives[key] ?? 0);
-      state.drives[key] = Number(clamp(current + clamp(Number(boost) * strength, 0, 0.12)).toFixed(4));
+      const amount = clamp(Number(boost) * strength, 0, 0.12);
+      if (isEmotion(key)) addEmotionImpulse(state, key, amount);
+      else state.drives[key] = Number(clamp(current + amount).toFixed(4));
       affected.add(key);
     }
   }
@@ -321,7 +400,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 9,
+    schemaVersion: 10,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -330,6 +409,12 @@ export function newState(now = new Date()) {
     sleepStartedAt: null,
     drives: Object.fromEntries(
       DRIVE_KEYS.map((key) => [key, Number(DIMENSIONS[key].initialValue ?? 0.15)]),
+    ),
+    emotions: Object.fromEntries(
+      EMOTION_KEYS.map((key) => [key, {
+        mood: Number((Number(DIMENSIONS[key].initialValue ?? 0) - Number(DIMENSIONS[key].baseline ?? 0)).toFixed(4)),
+        pulse: 0,
+      }]),
     ),
     thoughtPool: newThoughtPool(),
     fatigue: 0,
@@ -461,12 +546,12 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
     }
 
     let next;
-    if (Number.isFinite(Number(dim.decayPerHour))) {
-      const baseline = clamp(Number(dim.baseline ?? 0));
-      const step = Math.max(0, Number(dim.decayPerHour)) * elapsedHours;
-      if (current > baseline) next = Math.max(baseline, current - step);
-      else if (current < baseline) next = Math.min(baseline, current + step);
-      else next = current;
+    if (isEmotion(key)) {
+      const pulseFactor = 0.5 ** (elapsedHours / Math.max(0.05, Number(dim.pulseHalfLifeHours)));
+      const moodFactor = 0.5 ** (elapsedHours / Math.max(0.05, Number(dim.moodHalfLifeHours)));
+      state.emotions[key].pulse = Number((Number(state.emotions[key].pulse) * pulseFactor).toFixed(4));
+      state.emotions[key].mood = Number((Number(state.emotions[key].mood) * moodFactor).toFixed(4));
+      next = effectiveEmotion(state, key);
     } else if (current >= SATURATE_CEIL) {
       const decay = (current - SATURATE_FLOOR) * 0.10 * elapsedHours;
       next = clamp(Math.max(SATURATE_FLOOR, current - decay));
@@ -487,7 +572,8 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
   for (const [key, amount] of Object.entries(feedbacks)) {
     if (DRIVE_KEYS.includes(key)) {
       const before = Number(state.drives[key]);
-      state.drives[key] = Number(clamp(before + amount).toFixed(4));
+      if (isEmotion(key)) addEmotionImpulse(state, key, amount);
+      else state.drives[key] = Number(clamp(before + amount).toFixed(4));
       if (state.drives[key] !== before) changed = true;
     }
   }
@@ -572,7 +658,8 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // Additive deltas (backward-compatible)
   for (const [key, delta] of Object.entries(event.driveDeltas ?? {})) {
     if (DRIVE_KEYS.includes(key) && Number.isFinite(Number(delta))) {
-      state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
+      if (isEmotion(key)) addEmotionImpulse(state, key, Number(delta));
+      else state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
     }
   }
 
@@ -580,7 +667,8 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   for (const key of event.satisfiedDrives ?? []) {
     if (!DRIVE_KEYS.includes(key)) continue;
     const dim = DIMENSIONS[key];
-    state.drives[key] = Number(clamp(Number(state.drives[key]) * (dim.satisfyMul ?? 0.40)).toFixed(4));
+    if (isEmotion(key)) relieveEmotion(state, key, 1 - Number(dim.satisfyMul ?? 0.40));
+    else state.drives[key] = Number(clamp(Number(state.drives[key]) * (dim.satisfyMul ?? 0.40)).toFixed(4));
 
     // Cross-inhibition: satisfying key X reduces drives that list X in inhibitedBy
     for (const otherKey of DRIVE_KEYS) {
@@ -785,7 +873,8 @@ export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
   const state = ensureStateShape(structuredClone(input));
   for (const [key, delta] of Object.entries(feedback)) {
     if (DRIVE_KEYS.includes(key) && Number.isFinite(Number(delta))) {
-      state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
+      if (isEmotion(key)) addEmotionImpulse(state, key, Number(delta));
+      else state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
     }
   }
   state.lastSettledAt = iso(now);
