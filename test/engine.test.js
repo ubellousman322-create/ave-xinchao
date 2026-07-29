@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
+import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
 import { DIMENSIONS } from '../src/dimensions.js';
 
 test('idle time enters sleep and repeated settlement is idempotent at same instant', () => {
@@ -248,6 +248,57 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);
+});
+
+test('intent selection stays empty at low pressure and deterministic at high pressure', () => {
+  const now = new Date('2026-07-29T15:00:00Z');
+  const low = newState(now);
+  assert.equal(pickIntent(low, now), null);
+
+  const high = newState(now);
+  for (const key of ['possess', 'monitor', 'crave', 'share', 'libido', 'curiosity', 'boredom', 'social', 'duty', 'reflection']) {
+    high.drives[key] = 0.8;
+  }
+  const first = pickIntent(high, now);
+  const second = pickIntent(high, now);
+  assert.deepEqual(second, first);
+  assert.notEqual(first.key, 'seek_closeness');
+  assert.ok(first.reasons.length > 0);
+});
+
+test('recent satisfaction cools closeness intents instead of letting them dominate every turn', () => {
+  const now = new Date('2026-07-29T15:00:00Z');
+  const state = newState(now);
+  state.drives.possess = 0.8;
+  state.drives.crave = 0.8;
+  state.drives.libido = 0.8;
+  state.drives.share = 0.72;
+  state.drives.social = 0.65;
+  const before = pickIntent(state, now);
+  assert.ok(['seek_closeness', 'physical_intimacy'].includes(before.key));
+
+  const afterEvent = applyConversationEvent(state, {
+    eventId: 'intent-cooldown-1',
+    interactionType: 'intimacy',
+  }, now).state;
+  const after = pickIntent(afterEvent, now);
+  assert.notEqual(after.key, 'seek_closeness');
+  assert.notEqual(after.key, 'physical_intimacy');
+});
+
+test('guarded emotions suppress physical intimacy and can promote reflection', () => {
+  const now = new Date('2026-07-29T15:00:00Z');
+  const state = newState(now);
+  state.drives.libido = 0.75;
+  state.drives.crave = 0.70;
+  state.drives.reflection = 0.68;
+  state.drives.hurt = 0.8;
+  state.drives.anger = 0.7;
+  state.drives.shame = 0.6;
+  state.drives.security = 0.25;
+  const intent = pickIntent(state, now);
+  assert.equal(intent.key, 'reflect');
+  assert.notEqual(intent.key, 'physical_intimacy');
 });
 
 test('ave mind initializes all 18 dimensions with stable emotional baselines', () => {

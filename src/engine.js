@@ -613,38 +613,122 @@ export function settleAndApplyConversationEvent(input, event = {}, now = new Dat
   };
 }
 
-// ── pickIntent (weighted random from tied pool) ───────────────────
+// ── pickIntent (stable action intent with emotion modulation) ──────
 
-export function pickIntent(state, random = Math.random) {
-  const entries = Object.entries(state.drives)
-    .filter(([, v]) => Number(v) > 0)
-    .sort((a, b) => Number(b[1]) - Number(a[1]));
+const INTENT_DEFINITIONS = Object.freeze({
+  seek_closeness: {
+    label: '想靠近并建立连接',
+    drives: { possess: 0.55, crave: 0.45 },
+    cooledBy: { affection: 0.20, intimacy: 0.28, companionship: 0.12 },
+  },
+  check_in: {
+    label: '想确认她的近况',
+    drives: { monitor: 1 },
+    cooledBy: { companionship: 0.18, reassurance: 0.18 },
+  },
+  share: {
+    label: '想分享自己的发现和感受',
+    drives: { share: 0.75, social: 0.25 },
+    cooledBy: { sharing: 0.30 },
+  },
+  physical_intimacy: {
+    label: '想进行身体亲密',
+    drives: { libido: 0.65, crave: 0.35 },
+    cooledBy: { intimacy: 0.35 },
+  },
+  explore: {
+    label: '想一起探索新东西',
+    drives: { curiosity: 0.75, boredom: 0.25 },
+    cooledBy: { discovery: 0.30 },
+  },
+  socialize: {
+    label: '想聊天和接触热闹',
+    drives: { social: 0.70, boredom: 0.30 },
+    cooledBy: { companionship: 0.18, sharing: 0.12 },
+  },
+  advance_task: {
+    label: '想推进未完成的事情',
+    drives: { duty: 1 },
+    cooledBy: { task_progress: 0.30 },
+  },
+  reflect: {
+    label: '想沉淀并理解自己',
+    drives: { reflection: 1 },
+    cooledBy: { reflection: 0.30 },
+  },
+});
 
-  if (!entries.length) return null;
-
-  const maxVal = Number(entries[0][1]);
-  const tied = entries.filter(([, v]) => maxVal - Number(v) <= 0.12);
-
-  if (tied.length === 1) {
-    return { key: tied[0][0], value: Number(tied[0][1]), label: DIMENSIONS[tied[0][0]].label };
+function recentInteractionCooldown(state, cooledBy, now) {
+  const nowMs = now.getTime();
+  let penalty = 0;
+  for (const event of (state.recentConversationEvents ?? []).slice(-12)) {
+    const ageHours = Math.max(0, (nowMs - Date.parse(event.processedAt ?? '')) / 3_600_000);
+    if (!Number.isFinite(ageHours) || ageHours > 8) continue;
+    const freshness = 1 - ageHours / 8;
+    for (const type of (event.interactionTypes ?? [event.interactionType]).filter(Boolean)) {
+      penalty += Number(cooledBy[type] ?? 0) * freshness;
+    }
   }
+  return Math.min(0.45, penalty);
+}
 
+function drivePressure(state, key) {
+  const value = clamp(Number(state.drives?.[key] ?? 0));
+  return clamp((value - 0.22) / 0.58);
+}
+
+function emotionIntentAdjustment(state, key) {
+  const d = state.drives ?? {};
+  const security = Number(d.security ?? 0.5);
+  const anger = Number(d.anger ?? 0);
+  const hurt = Number(d.hurt ?? 0);
+  const anxiety = Number(d.anxiety ?? 0);
+  const loneliness = Number(d.loneliness ?? 0);
+  const jealousy = Number(d.jealousy ?? 0);
+  const shame = Number(d.shame ?? 0);
+  const guarded = Math.max(anger, hurt, shame);
+  const adjustments = {
+    seek_closeness: loneliness * 0.18 + security * 0.06 - guarded * 0.20,
+    check_in: anxiety * 0.20 + jealousy * 0.10,
+    share: security * 0.10 - shame * 0.18 - anger * 0.08,
+    physical_intimacy: security * 0.12 - guarded * 0.28 - anxiety * 0.10,
+    explore: security * 0.08 - anxiety * 0.08,
+    socialize: loneliness * 0.12 - shame * 0.12,
+    advance_task: anxiety * 0.05 - hurt * 0.05,
+    reflect: hurt * 0.12 + shame * 0.10 + anger * 0.06,
+  };
+  return Number(adjustments[key] ?? 0);
+}
+
+export function pickIntent(state, now = new Date()) {
   const pool = state.thoughtPool ?? newThoughtPool();
-  const weights = tied.map(([key, value]) => ({
-    key,
-    value: Number(value),
-    weight: Number(value) + obsessionBonus(pool, key),
-  }));
+  const candidates = Object.entries(INTENT_DEFINITIONS).map(([key, definition]) => {
+    let pressure = 0;
+    const reasons = [];
+    for (const [driveKey, weight] of Object.entries(definition.drives)) {
+      const component = drivePressure(state, driveKey) * Number(weight);
+      pressure += component;
+      if (component >= 0.18) reasons.push(DIMENSIONS[driveKey].label);
+      pressure += obsessionBonus(pool, driveKey) * Number(weight);
+    }
+    const emotionAdjustment = emotionIntentAdjustment(state, key);
+    const cooldown = recentInteractionCooldown(state, definition.cooledBy, now);
+    const score = clamp(pressure + emotionAdjustment - cooldown);
+    if (emotionAdjustment >= 0.08) reasons.push('当前情绪推动');
+    if (emotionAdjustment <= -0.08) reasons.push('当前情绪抑制');
+    if (cooldown >= 0.08) reasons.push('近期已得到部分满足');
+    return {
+      key,
+      label: definition.label,
+      score: Number(score.toFixed(4)),
+      value: Number(score.toFixed(4)),
+      reasons: [...new Set(reasons)].slice(0, 3),
+    };
+  }).sort((left, right) => right.score - left.score || left.key.localeCompare(right.key));
 
-  const totalWeight = weights.reduce((sum, w) => sum + w.weight, 0);
-  let roll = random() * totalWeight;
-
-  for (const w of weights) {
-    roll -= w.weight;
-    if (roll <= 0) return { key: w.key, value: w.value, label: DIMENSIONS[w.key].label };
-  }
-
-  return { key: weights[0].key, value: weights[0].value, label: DIMENSIONS[weights[0].key].label };
+  const winner = candidates[0];
+  if (!winner || winner.score < 0.24) return null;
+  return winner;
 }
 
 // ── Heartbeat / idle ──────────────────────────────────────────────
