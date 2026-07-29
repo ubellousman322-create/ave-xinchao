@@ -224,6 +224,47 @@ test('daily interaction effect limit fails closed without blocking conversation 
   assert.equal(activeSessionOverlay(second.state, 'claude-window', now).tone, 'conflicted');
 });
 
+test('default daily interaction limit allows 96 effective rounds and rejects the 97th', () => {
+  const start = new Date('2026-07-29T00:00:00Z');
+  let state = newState(start);
+  let result;
+  for (let index = 0; index < 96; index += 1) {
+    const now = new Date(start.getTime() + index * 60_000);
+    result = applyConversationEvent(state, {
+      eventId: `daily-96-${index}`,
+      interactionType: index % 2 ? 'conflict' : 'reassurance',
+    }, now);
+    state = result.state;
+    assert.equal(result.interaction.applied, true);
+  }
+  assert.equal(state.interactionUsage['2026-07-29'], 96);
+  const blocked = applyConversationEvent(state, {
+    eventId: 'daily-96-blocked',
+    interactionType: 'conflict',
+  }, new Date(start.getTime() + 96 * 60_000));
+  assert.equal(blocked.interaction.applied, false);
+  assert.equal(blocked.interaction.reasonCode, 'daily_effect_limit');
+});
+
+test('repeated identical labels fade for 30 minutes and then recover', () => {
+  const start = new Date('2026-07-29T00:00:00Z');
+  const first = applyConversationEvent(newState(start), {
+    eventId: 'repeat-1', interactionType: 'conflict',
+  }, start);
+  const angerAfterFirst = first.state.drives.anger;
+  const second = applyConversationEvent(first.state, {
+    eventId: 'repeat-2', interactionType: 'conflict',
+  }, new Date(start.getTime() + 5 * 60_000));
+  const secondIncrease = Number((second.state.drives.anger - angerAfterFirst).toFixed(4));
+  assert.equal(secondIncrease, 0.0525);
+
+  const recovered = applyConversationEvent(second.state, {
+    eventId: 'repeat-3', interactionType: 'conflict',
+  }, new Date(start.getTime() + 36 * 60_000));
+  const recoveredIncrease = Number((recovered.state.drives.anger - second.state.drives.anger).toFixed(4));
+  assert.equal(recoveredIncrease, 0.07);
+});
+
 test('expired session overlays are excluded and pruned on settlement', () => {
   const start = new Date('2026-07-28T00:00:00Z');
   const state = applyConversationEvent(newState(start), {

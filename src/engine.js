@@ -211,7 +211,7 @@ function applyInteractionOutcomes(state, tags, now, options = {}) {
       affectedDrives: [],
     };
   }
-  const maxPerDay = clamp(Number(options.maxInteractionEffectsPerDay ?? 24), 1, 96);
+  const maxPerDay = clamp(Number(options.maxInteractionEffectsPerDay ?? 96), 1, 96);
   const timeZone = options.timeZone ?? 'Asia/Shanghai';
   const { day } = localDayAndHour(now, timeZone);
   const used = Number(state.interactionUsage[day] ?? 0);
@@ -226,9 +226,21 @@ function applyInteractionOutcomes(state, tags, now, options = {}) {
   }
 
   const affected = new Set();
+  const repeatWindowMs = clamp(Number(options.repeatWindowMinutes ?? 30), 1, 1440) * 60_000;
+  const repeatDecay = clamp(Number(options.repeatDecay ?? 0.75), 0.1, 1);
+  const repeatFloor = clamp(Number(options.repeatFloor ?? 0.40), 0.05, 1);
   for (const tag of tags) {
     const effect = INTERACTION_EFFECTS[tag.type];
-    const strength = clamp(tag.intensity * tag.confidence, 0, 1);
+    const recentRepeats = state.recentConversationEvents.filter((event) => {
+      const at = Date.parse(event.processedAt ?? '');
+      const types = event.interactionTypes ?? [event.interactionType];
+      return Number.isFinite(at)
+        && now.getTime() - at >= 0
+        && now.getTime() - at <= repeatWindowMs
+        && types.includes(tag.type);
+    }).length;
+    const repeatMultiplier = Math.max(repeatFloor, repeatDecay ** recentRepeats);
+    const strength = clamp(tag.intensity * tag.confidence * repeatMultiplier, 0, 1);
     for (const [key, relief] of Object.entries(effect.relief ?? {})) {
       if (!DRIVE_KEYS.includes(key)) continue;
       const current = Number(state.drives[key] ?? 0);

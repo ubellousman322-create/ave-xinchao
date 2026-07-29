@@ -67,8 +67,11 @@ export function loadConfig() {
       refreshTtlSeconds: number('OAUTH_REFRESH_TTL_SECONDS', 31536000, 86400, 63072000),
     },
     interaction: {
-      maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
+      maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 96, 1, 96),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
+      repeatWindowMinutes: number('INTERACTION_REPEAT_WINDOW_MINUTES', 30, 1, 1440),
+      repeatDecay: number('INTERACTION_REPEAT_DECAY', 0.75, 0.1, 1),
+      repeatFloor: number('INTERACTION_REPEAT_FLOOR', 0.40, 0.05, 1),
     },
     heartbeat: {
       filePath: process.env.OMBRE_HEARTBEAT_FILE ?? '/memory-data/heartbeat.json',
