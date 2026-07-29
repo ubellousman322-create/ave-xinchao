@@ -63,6 +63,8 @@ test('tools/list exposes context, event and short handoff note tools', async () 
   assert.ok(result.body.result.tools[1].inputSchema.required.includes('event_id'));
   assert.equal(result.body.result.tools[1].inputSchema.required.includes('session_id'), false);
   assert.ok(result.body.result.tools[1].inputSchema.properties.interaction_type.enum.includes('sharing'));
+  assert.ok(result.body.result.tools[1].inputSchema.properties.interactions.items.properties.type.enum.includes('ignored'));
+  assert.equal(result.body.result.tools[1].inputSchema.properties.interactions.maxItems, 4);
   assert.equal(result.body.result.tools[2].annotations.idempotentHint, true);
   assert.deepEqual(
     result.body.result.tools[2].inputSchema.required,
@@ -100,6 +102,10 @@ test('xinchao_event drops chat plaintext and keeps only allowed short-state fiel
         session_id: 'codex-mac-1',
         event_id: 'event-1',
         interaction_type: 'sharing',
+        interactions: [
+          { type: 'ignored', intensity: 0.7, confidence: 0.9 },
+          { type: 'reassurance', intensity: 0.5, confidence: 0.8 },
+        ],
         tone: 'focused',
         attention: 0.9,
         message: '这段聊天正文绝不能进入状态',
@@ -112,6 +118,10 @@ test('xinchao_event drops chat plaintext and keeps only allowed short-state fiel
   assert.equal(received.sessionState.tone, 'focused');
   assert.equal(received.sessionState.attention, 0.9);
   assert.equal(received.interactionType, 'sharing');
+  assert.deepEqual(received.interactions, [
+    { type: 'ignored', intensity: 0.7, confidence: 0.9 },
+    { type: 'reassurance', intensity: 0.5, confidence: 0.8 },
+  ]);
   assert.equal('message' in received, false);
   assert.equal('driveDeltas' in received, false);
   assert.doesNotMatch(JSON.stringify(received), /聊天正文/);

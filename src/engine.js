@@ -19,19 +19,82 @@ export const INTERACTION_TYPES = Object.freeze([
   'conflict',
   'loss',
   'reconciliation',
+  'ignored',
+  'rejection',
+  'uncertainty',
+  'reassurance',
+  'boundary_respected',
+  'boundary_violation',
+  'comparison',
+  'embarrassment',
+  'exclusion',
 ]);
 
 const INTERACTION_EFFECTS = Object.freeze({
-  companionship: { relief: { monitor: 0.06, social: 0.05 } },
-  affection: { relief: { possess: 0.08, crave: 0.08, monitor: 0.05 } },
-  intimacy: { relief: { possess: 0.12, crave: 0.15, libido: 0.18 } },
-  sharing: { relief: { share: 0.14, social: 0.04 } },
+  companionship: {
+    relief: { monitor: 0.06, social: 0.05, loneliness: 0.10 },
+    boost: { security: 0.025 },
+  },
+  affection: {
+    relief: { possess: 0.08, crave: 0.08, monitor: 0.05, hurt: 0.08, anxiety: 0.05, loneliness: 0.08 },
+    boost: { security: 0.06 },
+  },
+  intimacy: {
+    relief: { possess: 0.12, crave: 0.15, libido: 0.18, loneliness: 0.08, anxiety: 0.04 },
+    boost: { security: 0.07 },
+  },
+  sharing: {
+    relief: { share: 0.14, social: 0.04, loneliness: 0.05 },
+    boost: { security: 0.025 },
+  },
   discovery: { relief: { curiosity: 0.15, boredom: 0.12 } },
-  task_progress: { relief: { duty: 0.15 } },
-  reflection: { relief: { reflection: 0.15 } },
-  conflict: { increase: { anger: 0.07, grieve: 0.02 } },
-  loss: { increase: { grieve: 0.08, monitor: 0.04 } },
-  reconciliation: { relief: { anger: 0.30, grieve: 0.18, monitor: 0.04 } },
+  task_progress: { relief: { duty: 0.15 }, boost: { security: 0.02 } },
+  reflection: { relief: { reflection: 0.15, anxiety: 0.04, shame: 0.03 } },
+  conflict: {
+    increase: { anger: 0.07, grieve: 0.02, hurt: 0.05, anxiety: 0.03 },
+    decrease: { security: 0.06 },
+  },
+  loss: {
+    increase: { grieve: 0.08, monitor: 0.04, loneliness: 0.06, anxiety: 0.025 },
+    decrease: { security: 0.035 },
+  },
+  reconciliation: {
+    relief: { anger: 0.30, grieve: 0.18, monitor: 0.04, hurt: 0.22, anxiety: 0.12, loneliness: 0.10 },
+    boost: { security: 0.08 },
+  },
+  ignored: {
+    increase: { hurt: 0.08, loneliness: 0.07, anger: 0.03, anxiety: 0.02 },
+    decrease: { security: 0.07 },
+  },
+  rejection: {
+    increase: { hurt: 0.07, grieve: 0.04, anxiety: 0.03, shame: 0.02 },
+    decrease: { security: 0.05 },
+  },
+  uncertainty: {
+    increase: { anxiety: 0.08, monitor: 0.03 },
+    decrease: { security: 0.025 },
+  },
+  reassurance: {
+    relief: { anxiety: 0.28, hurt: 0.12, loneliness: 0.10, jealousy: 0.12 },
+    boost: { security: 0.08 },
+  },
+  boundary_respected: {
+    relief: { anxiety: 0.10, hurt: 0.08, shame: 0.10 },
+    boost: { security: 0.07 },
+  },
+  boundary_violation: {
+    increase: { anger: 0.06, hurt: 0.09, anxiety: 0.05, shame: 0.05 },
+    decrease: { security: 0.10 },
+  },
+  comparison: {
+    increase: { jealousy: 0.10, anxiety: 0.03, hurt: 0.03 },
+    decrease: { security: 0.04 },
+  },
+  embarrassment: { increase: { shame: 0.09, anxiety: 0.03, hurt: 0.02 } },
+  exclusion: {
+    increase: { loneliness: 0.10, hurt: 0.06, grieve: 0.04, anger: 0.02 },
+    decrease: { security: 0.07 },
+  },
 });
 
 function ensureStateShape(state) {
@@ -79,9 +142,38 @@ function eventFingerprint(eventId) {
     : '';
 }
 
-function interactionType(event) {
-  const value = String(event?.interactionType ?? event?.interaction_type ?? '').trim().toLowerCase();
-  return INTERACTION_TYPES.includes(value) ? value : '';
+function normalizeInteractionTag(value, fallbackIntensity = 1, fallbackConfidence = 1) {
+  const source = typeof value === 'string' ? { type: value } : (value ?? {});
+  const type = String(source.type ?? source.interactionType ?? source.interaction_type ?? '')
+    .trim().toLowerCase();
+  if (!INTERACTION_TYPES.includes(type)) return null;
+  const intensity = clamp(Number(source.intensity ?? fallbackIntensity), 0.10, 1);
+  const confidence = clamp(Number(source.confidence ?? fallbackConfidence), 0, 1);
+  if (confidence < 0.45) return null;
+  return { type, intensity, confidence };
+}
+
+function interactionTags(event) {
+  const candidates = Array.isArray(event?.interactions)
+    ? event.interactions
+    : (Array.isArray(event?.interactionTypes ?? event?.interaction_types)
+      ? (event.interactionTypes ?? event.interaction_types)
+      : [event?.interactionType ?? event?.interaction_type]);
+  const unique = new Map();
+  for (const candidate of candidates.slice(0, 8)) {
+    const tag = normalizeInteractionTag(
+      candidate,
+      event?.intensity ?? 1,
+      event?.confidence ?? 1,
+    );
+    if (!tag) continue;
+    const previous = unique.get(tag.type);
+    if (!previous || tag.intensity * tag.confidence > previous.intensity * previous.confidence) {
+      unique.set(tag.type, tag);
+    }
+    if (unique.size >= 4) break;
+  }
+  return [...unique.values()];
 }
 
 function interactionAlreadyProcessed(state, eventId) {
@@ -92,23 +184,25 @@ function interactionAlreadyProcessed(state, eventId) {
   );
 }
 
-function recordConversationEventFingerprint(state, eventId, type, now) {
+function recordConversationEventFingerprint(state, eventId, tags, now) {
   const fingerprint = eventFingerprint(eventId);
   if (!fingerprint) return;
   state.recentConversationEvents = [
     ...state.recentConversationEvents,
     {
       eventFingerprint: fingerprint,
-      interactionType: type || null,
+      interactionType: tags[0]?.type ?? null,
+      interactionTypes: tags.map((tag) => tag.type),
       processedAt: iso(now),
     },
   ].slice(-MAX_RECENT_CONVERSATION_EVENTS);
 }
 
-function applyInteractionOutcome(state, type, now, options = {}) {
-  if (!type) {
+function applyInteractionOutcomes(state, tags, now, options = {}) {
+  if (tags.length === 0) {
     return {
       type: null,
+      types: [],
       applied: false,
       reasonCode: 'no_interaction_outcome',
       affectedDrives: [],
@@ -120,33 +214,51 @@ function applyInteractionOutcome(state, type, now, options = {}) {
   const used = Number(state.interactionUsage[day] ?? 0);
   if (used >= maxPerDay) {
     return {
-      type,
+      type: tags[0]?.type ?? null,
+      types: tags.map((tag) => tag.type),
       applied: false,
       reasonCode: 'daily_effect_limit',
       affectedDrives: [],
     };
   }
 
-  const effect = INTERACTION_EFFECTS[type];
   const affected = new Set();
-  for (const [key, relief] of Object.entries(effect.relief ?? {})) {
-    if (!DRIVE_KEYS.includes(key)) continue;
-    const current = Number(state.drives[key] ?? 0);
-    state.drives[key] = Number(clamp(current * (1 - clamp(Number(relief), 0, 0.35))).toFixed(4));
-    affected.add(key);
-  }
-  for (const [key, increase] of Object.entries(effect.increase ?? {})) {
-    if (!DRIVE_KEYS.includes(key)) continue;
-    const current = Number(state.drives[key] ?? 0);
-    state.drives[key] = Number(clamp(current + clamp(Number(increase), 0, 0.12)).toFixed(4));
-    affected.add(key);
+  for (const tag of tags) {
+    const effect = INTERACTION_EFFECTS[tag.type];
+    const strength = clamp(tag.intensity * tag.confidence, 0, 1);
+    for (const [key, relief] of Object.entries(effect.relief ?? {})) {
+      if (!DRIVE_KEYS.includes(key)) continue;
+      const current = Number(state.drives[key] ?? 0);
+      const ratio = clamp(Number(relief) * strength, 0, 0.35);
+      state.drives[key] = Number(clamp(current * (1 - ratio)).toFixed(4));
+      affected.add(key);
+    }
+    for (const [key, increase] of Object.entries(effect.increase ?? {})) {
+      if (!DRIVE_KEYS.includes(key)) continue;
+      const current = Number(state.drives[key] ?? 0);
+      state.drives[key] = Number(clamp(current + clamp(Number(increase) * strength, 0, 0.12)).toFixed(4));
+      affected.add(key);
+    }
+    for (const [key, decrease] of Object.entries(effect.decrease ?? {})) {
+      if (!DRIVE_KEYS.includes(key)) continue;
+      const current = Number(state.drives[key] ?? 0);
+      state.drives[key] = Number(clamp(current - clamp(Number(decrease) * strength, 0, 0.12)).toFixed(4));
+      affected.add(key);
+    }
+    for (const [key, boost] of Object.entries(effect.boost ?? {})) {
+      if (!DRIVE_KEYS.includes(key)) continue;
+      const current = Number(state.drives[key] ?? 0);
+      state.drives[key] = Number(clamp(current + clamp(Number(boost) * strength, 0, 0.12)).toFixed(4));
+      affected.add(key);
+    }
   }
   state.interactionUsage[day] = used + 1;
   state.interactionUsage = Object.fromEntries(
     Object.entries(state.interactionUsage).sort(([left], [right]) => right.localeCompare(left)).slice(0, 14),
   );
   return {
-    type,
+    type: tags[0]?.type ?? null,
+    types: tags.map((tag) => tag.type),
     applied: true,
     reasonCode: 'applied',
     affectedDrives: [...affected],
@@ -392,7 +504,7 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
 export function applyConversationEvent(input, event = {}, now = new Date(), options = {}) {
   const state = ensureStateShape(structuredClone(input));
   const eventId = cleanEventId(event);
-  const type = interactionType(event);
+  const tags = interactionTags(event);
   const sessionId = cleanSessionId(event);
   if (interactionAlreadyProcessed(state, eventId)) {
     return {
@@ -403,7 +515,8 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       sessionId,
       sessionCreated: false,
       interaction: {
-        type: type || null,
+        type: tags[0]?.type ?? null,
+        types: tags.map((tag) => tag.type),
         applied: false,
         reasonCode: 'duplicate_event',
         affectedDrives: [],
@@ -429,14 +542,15 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     };
   }
 
-  const interaction = type && !eventId
+  const interaction = tags.length > 0 && !eventId
     ? {
-      type,
+      type: tags[0]?.type ?? null,
+      types: tags.map((tag) => tag.type),
       applied: false,
       reasonCode: 'missing_event_id',
       affectedDrives: [],
     }
-    : applyInteractionOutcome(state, type, now, options);
+    : applyInteractionOutcomes(state, tags, now, options);
 
   // Additive deltas (backward-compatible)
   for (const [key, delta] of Object.entries(event.driveDeltas ?? {})) {
@@ -467,7 +581,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     }
   }
 
-  recordConversationEventFingerprint(state, eventId, type, now);
+  recordConversationEventFingerprint(state, eventId, tags, now);
   state.revision += 1;
   return {
     state,

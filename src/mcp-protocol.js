@@ -1,16 +1,12 @@
 const SUPPORTED_PROTOCOLS = new Set(['2025-03-26', '2025-06-18']);
-const INTERACTION_TYPES = new Set([
-  'companionship',
-  'affection',
-  'intimacy',
-  'sharing',
-  'discovery',
-  'task_progress',
-  'reflection',
-  'conflict',
-  'loss',
-  'reconciliation',
-]);
+const INTERACTION_TYPE_VALUES = [
+  'companionship', 'affection', 'intimacy', 'sharing', 'discovery',
+  'task_progress', 'reflection', 'conflict', 'loss', 'reconciliation',
+  'ignored', 'rejection', 'uncertainty', 'reassurance',
+  'boundary_respected', 'boundary_violation', 'comparison',
+  'embarrassment', 'exclusion',
+];
+const INTERACTION_TYPES = new Set(INTERACTION_TYPE_VALUES);
 
 export const XINCHAO_TOOLS = [
   {
@@ -82,24 +78,24 @@ export const XINCHAO_TOOLS = [
         },
         interaction_type: {
           type: 'string',
-          enum: [
-            'companionship',
-            'affection',
-            'intimacy',
-            'sharing',
-            'discovery',
-            'task_progress',
-            'reflection',
-            'conflict',
-            'loss',
-            'reconciliation',
-          ],
-          description: [
-            '已完成互动的结果类型；仅由心潮服务端映射为受限欲望变化。',
-            'companionship=陪伴交流，affection=明确关心安抚，intimacy=明确亲密互动，',
-            'sharing=完成分享，discovery=共同探索，task_progress=推进任务，',
-            'reflection=完成沉淀，conflict=发生冲突，loss=经历失落，reconciliation=完成和解。',
-          ].join(''),
+          enum: INTERACTION_TYPE_VALUES,
+          description: '兼容旧客户端的单互动类型；新客户端优先使用 interactions。',
+        },
+        interactions: {
+          type: 'array',
+          maxItems: 4,
+          uniqueItems: true,
+          description: '本轮已完成互动的结构化标签，最多四项；低置信度标签应省略。',
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: INTERACTION_TYPE_VALUES },
+              intensity: { type: 'number', minimum: 0.1, maximum: 1 },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+            },
+            required: ['type', 'intensity', 'confidence'],
+            additionalProperties: false,
+          },
         },
         tone: {
           type: 'string',
@@ -234,6 +230,23 @@ function eventArgs(args = {}, fallbackSessionId = '') {
   if (interactionType && !INTERACTION_TYPES.has(interactionType)) {
     throw new Error('interaction_type 不在允许范围内');
   }
+  const interactions = [];
+  if (args.interactions !== undefined && !Array.isArray(args.interactions)) {
+    throw new Error('interactions 必须是数组');
+  }
+  for (const item of (args.interactions ?? []).slice(0, 4)) {
+    const type = String(item?.type ?? '').trim().toLowerCase();
+    if (!INTERACTION_TYPES.has(type)) throw new Error('interactions 包含未知类型');
+    const intensity = Number(item?.intensity);
+    const confidence = Number(item?.confidence);
+    if (!Number.isFinite(intensity) || intensity < 0.1 || intensity > 1) {
+      throw new Error('interaction intensity 必须在 0.1 到 1 之间');
+    }
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      throw new Error('interaction confidence 必须在 0 到 1 之间');
+    }
+    interactions.push({ type, intensity, confidence });
+  }
   const sessionState = {};
   for (const key of ['tone', 'warmth', 'tension', 'attention', 'confidence']) {
     if (args[key] !== undefined) sessionState[key] = args[key];
@@ -242,6 +255,7 @@ function eventArgs(args = {}, fallbackSessionId = '') {
     sessionId,
     eventId,
     interactionType,
+    interactions,
     sessionState,
     sessionTtlMinutes: Math.max(15, Math.min(1440, numberOr(args.ttl_minutes, 240))),
   };

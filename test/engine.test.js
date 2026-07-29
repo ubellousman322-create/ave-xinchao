@@ -150,9 +150,31 @@ test('conversation outcomes settle elapsed growth before applying bounded drive 
   assert.equal(result.settled.elapsedHours, 1);
   assert.equal(result.interaction.applied, true);
   assert.equal(result.interaction.type, 'sharing');
-  assert.deepEqual(result.interaction.affectedDrives, ['share', 'social']);
+  assert.deepEqual(result.interaction.affectedDrives, ['share', 'social', 'loneliness', 'security']);
   assert.equal(result.state.drives.share, 0.1677);
   assert.equal(result.state.interactionUsage['2026-07-28'], 1);
+});
+
+test('multiple interaction tags combine bounded effects and count as one daily event', () => {
+  const now = new Date('2026-07-29T14:00:00Z');
+  const result = applyConversationEvent(newState(now), {
+    sessionId: 'ave-window',
+    eventId: 'ave-multi-1',
+    interactions: [
+      { type: 'ignored', intensity: 0.8, confidence: 0.9 },
+      { type: 'conflict', intensity: 0.5, confidence: 0.8 },
+      { type: 'ignored', intensity: 0.2, confidence: 0.7 },
+      { type: 'comparison', intensity: 1, confidence: 0.3 },
+    ],
+  }, now, { timeZone: 'Asia/Shanghai', maxInteractionEffectsPerDay: 24 });
+
+  assert.deepEqual(result.interaction.types, ['ignored', 'conflict']);
+  assert.equal(result.state.interactionUsage['2026-07-29'], 1);
+  assert.equal(result.state.drives.hurt, 0.1076);
+  assert.equal(result.state.drives.loneliness, 0.0904);
+  assert.equal(result.state.drives.anger, 0.0896);
+  assert.equal(result.state.drives.security, 0.4756);
+  assert.equal(result.state.drives.jealousy, 0.02);
 });
 
 test('conversation event ids make interaction settlement idempotent', () => {
