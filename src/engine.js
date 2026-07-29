@@ -35,6 +35,12 @@ const INTERACTION_EFFECTS = Object.freeze({
 });
 
 function ensureStateShape(state) {
+  state.drives ??= {};
+  for (const key of DRIVE_KEYS) {
+    if (!Number.isFinite(Number(state.drives[key]))) {
+      state.drives[key] = Number(DIMENSIONS[key].initialValue ?? 0.15);
+    }
+  }
   state.sessionOverlays ??= {};
   state.contextDeliveries ??= {};
   state.recentConversationEvents = Array.isArray(state.recentConversationEvents)
@@ -42,7 +48,7 @@ function ensureStateShape(state) {
     : [];
   state.interactionUsage ??= {};
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
-  state.schemaVersion = Math.max(7, Number(state.schemaVersion) || 0);
+  state.schemaVersion = Math.max(8, Number(state.schemaVersion) || 0);
   return state;
 }
 
@@ -188,14 +194,16 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
     lastHeartbeatAt: null,
     lastSettledAt: at,
     sleepStartedAt: null,
-    drives: Object.fromEntries(DRIVE_KEYS.map((key) => [key, 0.15])),
+    drives: Object.fromEntries(
+      DRIVE_KEYS.map((key) => [key, Number(DIMENSIONS[key].initialValue ?? 0.15)]),
+    ),
     thoughtPool: newThoughtPool(),
     fatigue: 0,
     recentDreams: [],
@@ -325,7 +333,13 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
     }
 
     let next;
-    if (current >= SATURATE_CEIL) {
+    if (Number.isFinite(Number(dim.decayPerHour))) {
+      const baseline = clamp(Number(dim.baseline ?? 0));
+      const step = Math.max(0, Number(dim.decayPerHour)) * elapsedHours;
+      if (current > baseline) next = Math.max(baseline, current - step);
+      else if (current < baseline) next = Math.min(baseline, current + step);
+      else next = current;
+    } else if (current >= SATURATE_CEIL) {
       const decay = (current - SATURATE_FLOOR) * 0.10 * elapsedHours;
       next = clamp(Math.max(SATURATE_FLOOR, current - decay));
     } else {

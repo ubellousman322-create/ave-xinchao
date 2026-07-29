@@ -69,7 +69,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 7);
+  assert.equal(state.schemaVersion, 8);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -222,8 +222,46 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 7);
+  assert.equal(settled.state.schemaVersion, 8);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);
+});
+
+test('ave mind initializes all 18 dimensions with stable emotional baselines', () => {
+  const state = newState(new Date('2026-07-29T00:00:00Z'));
+  assert.equal(Object.keys(state.drives).length, 18);
+  assert.equal(state.drives.anxiety, 0.04);
+  assert.equal(state.drives.hurt, 0.03);
+  assert.equal(state.drives.loneliness, 0.04);
+  assert.equal(state.drives.jealousy, 0.02);
+  assert.equal(state.drives.shame, 0.02);
+  assert.equal(state.drives.security, 0.55);
+});
+
+test('old states keep existing drives and receive only missing ave dimensions', () => {
+  const now = new Date('2026-07-29T00:00:00Z');
+  const old = newState(now);
+  old.schemaVersion = 7;
+  old.drives.possess = 0.73;
+  for (const key of ['anxiety', 'hurt', 'loneliness', 'jealousy', 'shame', 'security']) {
+    delete old.drives[key];
+  }
+  const settled = settleState(old, now, 90);
+  assert.equal(settled.state.drives.possess, 0.73);
+  assert.equal(settled.state.drives.hurt, 0.03);
+  assert.equal(settled.state.drives.security, 0.55);
+  assert.equal(settled.state.schemaVersion, 8);
+});
+
+test('emotions decay toward their own baselines instead of growing like needs', () => {
+  const start = new Date('2026-07-29T00:00:00Z');
+  const state = newState(start);
+  state.drives.anger = 0.50;
+  state.drives.hurt = 0.40;
+  state.drives.security = 0.80;
+  const settled = settleState(state, new Date('2026-07-29T10:00:00Z'), 90).state;
+  assert.equal(settled.drives.anger, 0.20);
+  assert.equal(settled.drives.hurt, 0.26);
+  assert.equal(settled.drives.security, 0.77);
 });
