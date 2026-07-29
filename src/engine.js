@@ -110,8 +110,11 @@ function ensureStateShape(state) {
     ? state.recentConversationEvents.slice(-MAX_RECENT_CONVERSATION_EVENTS)
     : [];
   state.interactionUsage ??= {};
+  state.recentDriveChanges = Array.isArray(state.recentDriveChanges)
+    ? state.recentDriveChanges.slice(-32)
+    : [];
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
-  state.schemaVersion = Math.max(8, Number(state.schemaVersion) || 0);
+  state.schemaVersion = Math.max(9, Number(state.schemaVersion) || 0);
   return state;
 }
 
@@ -306,7 +309,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 8,
+    schemaVersion: 9,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -335,6 +338,7 @@ export function newState(now = new Date()) {
     contextDeliveries: {},
     recentConversationEvents: [],
     interactionUsage: {},
+    recentDriveChanges: [],
   };
 }
 
@@ -523,6 +527,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       },
     };
   }
+  const drivesBefore = structuredClone(state.drives);
   const wasSleeping = state.consciousness === 'sleeping';
   state.consciousness = 'awake';
   state.lastConversationAt = iso(now);
@@ -582,6 +587,22 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   }
 
   recordConversationEventFingerprint(state, eventId, tags, now);
+  const driveChanges = {};
+  for (const key of DRIVE_KEYS) {
+    const delta = Number((Number(state.drives[key]) - Number(drivesBefore[key] ?? 0)).toFixed(4));
+    if (Math.abs(delta) >= 0.0001) driveChanges[key] = delta;
+  }
+  if (eventId && Object.keys(driveChanges).length > 0) {
+    state.recentDriveChanges = [
+      ...state.recentDriveChanges,
+      {
+        eventFingerprint: eventFingerprint(eventId),
+        at: iso(now),
+        interactionTypes: tags.map((tag) => tag.type),
+        deltas: driveChanges,
+      },
+    ].slice(-32);
+  }
   state.revision += 1;
   return {
     state,

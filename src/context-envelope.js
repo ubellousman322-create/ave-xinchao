@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { breathDreamContext, topDrives } from './engine.js';
+import { breathDreamContext, pickIntent } from './engine.js';
+import { DIMENSIONS } from './dimensions.js';
 import { renderHandoffNotes } from './handoff-notes.js';
 
 const VALID_MODES = new Set(['session_start', 'turn', 'inspect']);
@@ -75,28 +76,90 @@ function thoughtSignals(state) {
   };
 }
 
+function recentChanges(state, now, maxAgeHours = 6) {
+  const cutoff = now.getTime() - maxAgeHours * 3_600_000;
+  const totals = {};
+  for (const event of state.recentDriveChanges ?? []) {
+    const at = Date.parse(event.at ?? '');
+    if (!Number.isFinite(at) || at < cutoff || at > now.getTime()) continue;
+    for (const [key, delta] of Object.entries(event.deltas ?? {})) {
+      totals[key] = Number(((totals[key] ?? 0) + Number(delta)).toFixed(4));
+    }
+  }
+  return totals;
+}
+
+function stateScore(key, value, delta) {
+  const dim = DIMENSIONS[key];
+  if (!dim) return 0;
+  let departure;
+  if (dim.group === 'emotion_negative' || dim.group === 'emotion_positive') {
+    departure = Math.abs(Number(value) - Number(dim.baseline ?? 0));
+  } else {
+    departure = Math.max(0, Number(value) - 0.22);
+  }
+  return departure + Math.min(0.25, Math.abs(Number(delta ?? 0)) * 1.8);
+}
+
+export function composeStateSummary(state, now = new Date()) {
+  const changes = recentChanges(state, now);
+  const candidates = Object.entries(state.drives ?? {}).map(([key, rawValue]) => {
+    const value = Number(rawValue);
+    const delta = Number(changes[key] ?? 0);
+    return {
+      key,
+      label: DIMENSIONS[key]?.label ?? key,
+      group: DIMENSIONS[key]?.group ?? 'unknown',
+      value: Number(value.toFixed(3)),
+      delta: Number(delta.toFixed(3)),
+      score: Number(stateScore(key, value, delta).toFixed(4)),
+    };
+  }).filter((item) => item.score >= 0.08)
+    .sort((left, right) => right.score - left.score || left.key.localeCompare(right.key));
+
+  const primary = [];
+  if (candidates[0]) primary.push(candidates[0]);
+  const differentGroup = candidates.find((item) => !primary.some((chosen) => chosen.key === item.key)
+    && !primary.some((chosen) => chosen.group === item.group));
+  if (differentGroup) primary.push(differentGroup);
+  else if (candidates[1]) primary.push(candidates[1]);
+  const secondary = candidates
+    .filter((item) => !primary.some((chosen) => chosen.key === item.key))
+    .slice(0, 2);
+  const significantChanges = candidates
+    .filter((item) => Math.abs(item.delta) >= 0.015)
+    .sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta))
+    .slice(0, 4);
+  return {
+    intent: pickIntent(state, now),
+    primary,
+    secondary,
+    significantChanges,
+  };
+}
+
 function dynamicSection(state, sessionId, now) {
   return {
     consciousness: state.consciousness,
     fatigue: Number(Number(state.fatigue ?? 0).toFixed(3)),
-    topDrives: topDrives(state, 4).map((drive) => ({
-      key: drive.key,
-      label: drive.label,
-      value: Number(Number(drive.value).toFixed(3)),
-    })),
+    summary: composeStateSummary(state, now),
     thoughts: thoughtSignals(state),
     session: sessionOverlay(state, sessionId, now),
   };
 }
 
 function renderDynamic(value) {
-  const drives = value.topDrives
-    .map((item) => `${item.label}=${item.value.toFixed(3)}`)
-    .join('；');
+  const formatState = (item) => `${item.label}=${item.value.toFixed(3)}`;
+  const intent = value.summary.intent;
   const parts = [
     `意识=${value.consciousness}`,
     `疲劳=${value.fatigue.toFixed(3)}`,
-    drives ? `当前驱力：${drives}` : '',
+    intent ? `当前意图：${intent.label} score=${intent.score.toFixed(3)}${intent.reasons.length ? `（${intent.reasons.join('；')}）` : ''}` : '当前意图：暂无主导意图',
+    value.summary.primary.length ? `主导状态：${value.summary.primary.map(formatState).join('；')}` : '',
+    value.summary.secondary.length ? `次要状态：${value.summary.secondary.map(formatState).join('；')}` : '',
+    value.summary.significantChanges.length
+      ? `近期变化：${value.summary.significantChanges.map((item) => `${item.label}${item.delta >= 0 ? '+' : ''}${item.delta.toFixed(3)}`).join('；')}`
+      : '',
   ].filter(Boolean);
   if (value.session) {
     parts.push(

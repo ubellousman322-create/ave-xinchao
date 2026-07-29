@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildContextEnvelope,
+  composeStateSummary,
   contextDeliveryState,
   estimateTokens,
   recordContextDelivery,
@@ -55,6 +56,42 @@ test('session-start envelope carries recent continuity without pretending to be 
   assert.match(envelope.additionalContext, /近期连续性（不替代基岩）/);
   assert.match(envelope.additionalContext, /最近发生的事/);
   assert.ok(envelope.estimatedTokens <= 300);
+});
+
+test('state orchestration limits output and surfaces real recent changes', () => {
+  const now = new Date('2026-07-29T15:00:00Z');
+  let state = newState(now);
+  state.drives.possess = 0.78;
+  state.drives.curiosity = 0.72;
+  state = applyConversationEvent(state, {
+    eventId: 'summary-change-1',
+    interactions: [
+      { type: 'ignored', intensity: 1, confidence: 1 },
+      { type: 'conflict', intensity: 1, confidence: 1 },
+    ],
+  }, now).state;
+  const summary = composeStateSummary(state, now);
+  assert.ok(summary.primary.length <= 2);
+  assert.ok(summary.secondary.length <= 2);
+  assert.notEqual(summary.primary[0].key, 'security');
+  assert.ok(summary.significantChanges.some((item) => item.key === 'hurt' && item.delta > 0));
+  assert.ok(summary.significantChanges.some((item) => item.key === 'security' && item.delta < 0));
+
+  const envelope = buildContextEnvelope({ state, sessionId: 'window-a', mode: 'turn', now });
+  assert.match(envelope.additionalContext, /当前意图：/);
+  assert.match(envelope.additionalContext, /主导状态：/);
+  assert.match(envelope.additionalContext, /近期变化：/);
+  assert.doesNotMatch(envelope.additionalContext, /当前驱力：/);
+});
+
+test('state orchestration expires changes after six hours', () => {
+  const at = new Date('2026-07-29T08:00:00Z');
+  const state = applyConversationEvent(newState(at), {
+    eventId: 'summary-old-1',
+    interactionType: 'conflict',
+  }, at).state;
+  const summary = composeStateSummary(state, new Date('2026-07-29T15:00:01Z'));
+  assert.deepEqual(summary.significantChanges, []);
 });
 
 test('session-start delivery is suppressed within the configured window', () => {

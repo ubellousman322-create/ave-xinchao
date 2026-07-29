@@ -69,7 +69,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 8);
+  assert.equal(state.schemaVersion, 9);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -244,8 +244,9 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 8);
+  assert.equal(settled.state.schemaVersion, 9);
   assert.deepEqual(settled.state.handoffNotes, []);
+  assert.deepEqual(settled.state.recentDriveChanges, []);
   assert.equal(settled.changed, true);
   assert.equal(settled.state.revision, 1);
 });
@@ -324,7 +325,7 @@ test('old states keep existing drives and receive only missing ave dimensions', 
   assert.equal(settled.state.drives.possess, 0.73);
   assert.equal(settled.state.drives.hurt, 0.03);
   assert.equal(settled.state.drives.security, 0.55);
-  assert.equal(settled.state.schemaVersion, 8);
+  assert.equal(settled.state.schemaVersion, 9);
 });
 
 test('emotions decay toward their own baselines instead of growing like needs', () => {
