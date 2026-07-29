@@ -19,6 +19,7 @@ if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
 
 const store = new StateStore(config.statePath, () => newState());
 const model = new ModelClient(config.model);
+const interactionClassifier = new ModelClient(config.interactionClassifier);
 const ombre = new OmbreClient(config.ombre);
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
@@ -580,6 +581,24 @@ const server = createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/v1/settle') {
       const result = await runCycle();
       return send(response, 200, { revision: result.state.revision, consciousness: result.state.consciousness, dreamCreated: result.dreamCreated, barkSent: result.barkSent, daytimeSent: result.daytimeSent });
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/classify-interaction') {
+      if (!config.interactionClassifier.enabled) {
+        return send(response, 503, { error: 'interaction classifier disabled' });
+      }
+      const payload = await body(request);
+      const userText = String(payload.user_text ?? payload.userText ?? '').slice(0, config.interactionClassifier.maxInputChars);
+      const assistantText = String(payload.assistant_text ?? payload.assistantText ?? '').slice(0, config.interactionClassifier.maxInputChars);
+      if (!userText.trim() || !assistantText.trim()) {
+        return send(response, 400, { error: 'user_text and assistant_text are required' });
+      }
+      try {
+        const classified = await interactionClassifier.classifyInteraction({ userText, assistantText });
+        return send(response, 200, classified);
+      } catch (error) {
+        log('interaction_classifier_failed', { message: error.message });
+        return send(response, 502, { error: 'interaction classifier failed' });
+      }
     }
     if (request.method === 'POST' && (url.pathname === '/v1/conversation-event' || url.pathname === '/v1/heartbeat')) {
       const event = await body(request);

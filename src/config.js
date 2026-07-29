@@ -33,6 +33,17 @@ export function loadConfig() {
       agentName,
       notificationRecipient,
     },
+    interactionClassifier: {
+      enabled: bool('INTERACTION_CLASSIFIER_ENABLED', false),
+      baseUrl: (process.env.INTERACTION_CLASSIFIER_BASE_URL ?? process.env.MODEL_BASE_URL ?? 'http://127.0.0.1:11434/v1').replace(/\/$/, ''),
+      apiKey: process.env.INTERACTION_CLASSIFIER_API_KEY ?? process.env.MODEL_API_KEY ?? '',
+      name: process.env.INTERACTION_CLASSIFIER_MODEL ?? process.env.MODEL_NAME ?? 'local-model',
+      timeoutMs: number('INTERACTION_CLASSIFIER_TIMEOUT_MS', 12000, 1000, 60000),
+      maxInputChars: number('INTERACTION_CLASSIFIER_MAX_INPUT_CHARS', 12000, 1000, 24000),
+      maxOutputTokens: number('INTERACTION_CLASSIFIER_MAX_OUTPUT_TOKENS', 500, 100, 1200),
+      agentName,
+      notificationRecipient,
+    },
     dreamMinIntervalHours: number('DREAM_MIN_INTERVAL_HOURS', 6, 1, 168),
     dreamMaxPerDay: number('DREAM_MAX_PER_DAY', 4, 1, 12),
     ombre: {

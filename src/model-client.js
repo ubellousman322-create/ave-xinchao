@@ -145,6 +145,53 @@ export class ModelClient {
     return { message: String(parsed.message ?? '').slice(0, 900), source: 'model' };
   }
 
+  async classifyInteraction({ userText, assistantText }) {
+    if (!this.config.enabled || !this.config.apiKey) {
+      return { interactions: [], source: 'disabled', model: null };
+    }
+    const allowed = [
+      'companionship', 'affection', 'intimacy', 'sharing', 'discovery',
+      'task_progress', 'reflection', 'conflict', 'loss', 'reconciliation',
+      'ignored', 'rejection', 'uncertainty', 'reassurance',
+      'boundary_respected', 'boundary_violation', 'comparison',
+      'embarrassment', 'exclusion',
+    ];
+    const budget = Math.max(500, Math.floor(this.config.maxInputChars / 2));
+    const prompt = [
+      '判断这一轮用户与 AI 已完成互动的客观结果。只标记有明确文本证据的结果，不推测隐藏心理。',
+      '最多选择4项。普通问答若只是推进任务可用 task_progress；没有明确结果时返回空数组。',
+      'intensity 表示事件强度，confidence 表示判断把握，均为0到1；confidence低于0.45的项不要输出。',
+      `允许标签：${allowed.join(', ')}`,
+      '只输出 JSON：{"interactions":[{"type":"...","intensity":0.0,"confidence":0.0}]}。不要解释。',
+      `用户消息：${String(userText ?? '').slice(0, budget)}`,
+      `AI回复：${String(assistantText ?? '').slice(0, budget)}`,
+    ].join('\n');
+    const body = {
+      model: this.config.name,
+      messages: [
+        { role: 'system', content: '你是严格、保守的人机互动结果分类器。不得输出允许列表之外的标签。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.1,
+      max_tokens: this.config.maxOutputTokens,
+      thinking: { type: 'disabled' },
+      response_format: { type: 'json_object' },
+    };
+    let response = await this.request(body);
+    if (!response.ok && [400, 422].includes(response.status)) {
+      delete body.response_format;
+      response = await this.request(body);
+    }
+    if (!response.ok) throw new Error(`interaction classifier request failed: HTTP ${response.status}`);
+    const payload = await response.json();
+    const parsed = parseJson(payload.choices?.[0]?.message?.content ?? '');
+    return {
+      interactions: sanitizeInteractions(parsed.interactions, allowed),
+      source: 'model',
+      model: this.config.name,
+    };
+  }
+
   request(body) {
     return fetch(`${this.config.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -208,6 +255,28 @@ function defaultDreamPushPrompt(agentName, notificationRecipient) {
     '只避免复用近期通知的相同措辞、句式和具体表达。',
     '只输出推送文案，不要解释、前缀或标签。'
   ].join('\n');
+}
+
+function sanitizeInteractions(value, allowedValues) {
+  const allowed = new Set(allowedValues);
+  const source = Array.isArray(value) ? value : [];
+  const unique = new Map();
+  for (const candidate of source.slice(0, 12)) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const type = String(candidate.type ?? '').trim().toLowerCase();
+    if (!allowed.has(type)) continue;
+    const rawIntensity = Number(candidate.intensity);
+    const rawConfidence = Number(candidate.confidence);
+    if (!Number.isFinite(rawIntensity) || !Number.isFinite(rawConfidence)) continue;
+    const intensity = Math.max(0.1, Math.min(1, rawIntensity));
+    const confidence = Math.max(0, Math.min(1, rawConfidence));
+    if (confidence < 0.45) continue;
+    const previous = unique.get(type);
+    if (!previous || confidence > previous.confidence) unique.set(type, { type, intensity, confidence });
+  }
+  return [...unique.values()]
+    .sort((left, right) => right.confidence - left.confidence)
+    .slice(0, 4);
 }
 
 function parseJson(text) {
