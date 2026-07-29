@@ -259,13 +259,14 @@ function interactionAlreadyProcessed(state, eventId) {
   );
 }
 
-function recordConversationEventFingerprint(state, eventId, tags, now) {
+function recordConversationEventFingerprint(state, eventId, tags, now, sessionId = '') {
   const fingerprint = eventFingerprint(eventId);
   if (!fingerprint) return;
   state.recentConversationEvents = [
     ...state.recentConversationEvents,
     {
       eventFingerprint: fingerprint,
+      sessionId: String(sessionId ?? '').slice(0, 120),
       interactionType: tags[0]?.type ?? null,
       interactionTypes: tags.map((tag) => tag.type),
       processedAt: iso(now),
@@ -686,7 +687,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     }
   }
 
-  recordConversationEventFingerprint(state, eventId, tags, now);
+  recordConversationEventFingerprint(state, eventId, tags, now, sessionId);
   const driveChanges = {};
   for (const key of DRIVE_KEYS) {
     const delta = Number((Number(state.drives[key]) - Number(drivesBefore[key] ?? 0)).toFixed(4));
@@ -697,6 +698,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
       ...state.recentDriveChanges,
       {
         eventFingerprint: eventFingerprint(eventId),
+        sessionId,
         at: iso(now),
         interactionTypes: tags.map((tag) => tag.type),
         deltas: driveChanges,

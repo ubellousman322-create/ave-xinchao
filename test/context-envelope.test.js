@@ -133,3 +133,24 @@ test('turn envelopes are not blocked by session-start delivery state', () => {
   const delivery = contextDeliveryState(state, 'window-a', 'turn', now, 12);
   assert.equal(delivery.alreadyDelivered, false);
 });
+
+test('15-minute interaction trace preserves order, isolates sessions and expires without plaintext', () => {
+  const start = new Date('2026-07-30T01:00:00Z');
+  let state = newState(start);
+  state = applyConversationEvent(state, {
+    sessionId: 'window-a', eventId: 'trace-1', interactionType: 'conflict', userText: 'PRIVATE-A',
+  }, start).state;
+  state = applyConversationEvent(state, {
+    sessionId: 'window-b', eventId: 'trace-other', interactionType: 'sharing', userText: 'PRIVATE-B',
+  }, new Date('2026-07-30T01:03:00Z')).state;
+  state = applyConversationEvent(state, {
+    sessionId: 'window-a', eventId: 'trace-2', interactions: ['reassurance', 'reconciliation'], assistantText: 'PRIVATE-C',
+  }, new Date('2026-07-30T01:05:00Z')).state;
+
+  const active = buildContextEnvelope({ state, sessionId: 'window-a', mode: 'turn', now: new Date('2026-07-30T01:10:00Z') });
+  assert.match(active.additionalContext, /近15分钟互动轨迹（2轮）：冲突 → 确认安心\+和解/);
+  assert.doesNotMatch(active.additionalContext, /分享|PRIVATE-/);
+
+  const expired = buildContextEnvelope({ state, sessionId: 'window-a', mode: 'turn', now: new Date('2026-07-30T01:21:00Z') });
+  assert.doesNotMatch(expired.additionalContext, /近15分钟互动轨迹/);
+});

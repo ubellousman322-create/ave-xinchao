@@ -7,3 +7,4 @@ state/*
 memory-data/*
 !memory-data/.gitkeep
 .backups/
+run/

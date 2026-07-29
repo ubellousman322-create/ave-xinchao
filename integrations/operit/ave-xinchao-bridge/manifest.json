@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "ave-xinchao-bridge",
+  "version": "0.2.0",
+  "main": "dist/main.js",
+  "display_name": {
+    "zh": "ave 心潮桥接",
+    "en": "ave Xinchao Bridge"
+  },
+  "description": {
+    "zh": "ave-xinchao 的每轮状态注入与幂等互动回传桥接。",
+    "en": "Per-turn context injection and idempotent interaction feedback bridge for ave-xinchao."
+  },
+  "enabled_by_default": false,
+  "subpackages": []
+}

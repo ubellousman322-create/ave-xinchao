@@ -5,6 +5,14 @@ import { renderHandoffNotes } from './handoff-notes.js';
 
 const VALID_MODES = new Set(['session_start', 'turn', 'inspect']);
 
+const INTERACTION_LABELS = Object.freeze({
+  companionship: '陪伴', affection: '表达喜欢', intimacy: '亲密靠近', sharing: '分享',
+  discovery: '共同发现', task_progress: '任务推进', reflection: '反思整理', conflict: '冲突',
+  loss: '失落', reconciliation: '和解', ignored: '被忽视', rejection: '拒绝',
+  uncertainty: '不确定', reassurance: '确认安心', boundary_respected: '边界被尊重',
+  boundary_violation: '边界受侵犯', comparison: '比较', embarrassment: '尴尬', exclusion: '被排除',
+});
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, Number(value)));
 }
@@ -89,6 +97,24 @@ function recentChanges(state, now, maxAgeHours = 6) {
   return totals;
 }
 
+export function recentInteractionWindow(state, sessionId, now = new Date(), windowMinutes = 15, limit = 8) {
+  const nowMs = new Date(now).getTime();
+  const cutoff = nowMs - Math.max(1, Number(windowMinutes) || 15) * 60_000;
+  return (state.recentConversationEvents ?? [])
+    .filter((event) => {
+      const at = Date.parse(event.processedAt ?? '');
+      return event.sessionId === sessionId && Number.isFinite(at) && at >= cutoff && at <= nowMs;
+    })
+    .slice(-Math.max(1, Number(limit) || 8))
+    .map((event) => ({
+      at: event.processedAt,
+      types: (event.interactionTypes ?? [event.interactionType])
+        .filter((type) => INTERACTION_LABELS[type])
+        .slice(0, 4),
+    }))
+    .filter((event) => event.types.length > 0);
+}
+
 function stateScore(key, value, delta) {
   const dim = DIMENSIONS[key];
   if (!dim) return 0;
@@ -165,6 +191,7 @@ function dynamicSection(state, sessionId, now) {
     fatigue: Number(Number(state.fatigue ?? 0).toFixed(3)),
     summary: composeStateSummary(state, now),
     thoughts: thoughtSignals(state),
+    interactionWindow: recentInteractionWindow(state, sessionId, now),
     session: sessionOverlay(state, sessionId, now),
   };
 }
@@ -175,6 +202,9 @@ function renderDynamic(value) {
     return `${item.label}=${item.value.toFixed(3)}（持续${item.mood >= 0 ? '+' : ''}${item.mood.toFixed(3)}，瞬时${item.pulse >= 0 ? '+' : ''}${item.pulse.toFixed(3)}；${item.trend}）`;
   };
   const intent = value.summary.intent;
+  const interactionTrace = value.interactionWindow
+    .map((event) => event.types.map((type) => INTERACTION_LABELS[type]).join('+'))
+    .join(' → ');
   const parts = [
     `意识=${value.consciousness}`,
     `疲劳=${value.fatigue.toFixed(3)}`,
@@ -184,6 +214,7 @@ function renderDynamic(value) {
     value.summary.significantChanges.length
       ? `近期变化：${value.summary.significantChanges.map((item) => `${item.label}${item.delta >= 0 ? '+' : ''}${item.delta.toFixed(3)}`).join('；')}`
       : '',
+    interactionTrace ? `近15分钟互动轨迹（${value.interactionWindow.length}轮）：${interactionTrace}` : '',
   ].filter(Boolean);
   if (value.session) {
     parts.push(
