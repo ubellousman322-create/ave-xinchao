@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
+import { activeSessionOverlay, applyConversationEvent, applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, barkDuplicateCheck, barkMessageSimilarity, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, emotionBreakdown, newState, pickIntent, pickIntents, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState } from '../src/engine.js';
 import { DIMENSIONS } from '../src/dimensions.js';
 
 test('idle time enters sleep and repeated settlement is idempotent at same instant', () => {
@@ -69,7 +69,7 @@ test('Bark history spans message kinds and keeps only the latest eight sends', (
     if (index === 2) state = recordDaytimeEmergence(state, `message-${index}`, at);
     else state = recordBark(state, at, { kind: index % 2 ? 'dream' : 'autonomous_thought', message: `message-${index}` });
   }
-  assert.equal(state.schemaVersion, 10);
+  assert.equal(state.schemaVersion, 11);
   assert.deepEqual(recentBarkHistory(state).map((item) => item.message), ['message-1', 'message-2', 'message-3', 'message-4', 'message-5', 'message-6', 'message-7', 'message-8']);
   assert.deepEqual(new Set(recentBarkHistory(state).map((item) => item.kind)), new Set(['dream', 'daytime_emergence', 'autonomous_thought']));
 });
@@ -155,6 +155,61 @@ test('conversation outcomes settle elapsed growth before applying bounded drive 
   assert.equal(result.state.interactionUsage['2026-07-28'], 1);
 });
 
+test('task progress relieves duty without manufacturing relationship security', () => {
+  const now = new Date('2026-07-30T00:00:00Z');
+  const state = newState(now);
+  state.drives.duty = 0.8;
+  const result = applyConversationEvent(state, {
+    eventId: 'task-only-security-guard',
+    interactionType: 'task_progress',
+  }, now);
+  assert.ok(result.state.drives.duty < 0.8);
+  assert.equal(result.state.drives.security, DIMENSIONS.security.initialValue);
+  assert.equal(result.interaction.affectedDrives.includes('security'), false);
+});
+
+test('positive multi-tags use a primary security effect plus bounded synergy', () => {
+  const now = new Date('2026-07-30T00:00:00Z');
+  const single = applyConversationEvent(newState(now), {
+    eventId: 'single-reassurance',
+    interactionType: 'reassurance',
+  }, now);
+  const combined = applyConversationEvent(newState(now), {
+    eventId: 'combined-positive-tags',
+    interactions: ['affection', 'intimacy', 'reassurance'],
+  }, now);
+  const initialSecurity = Number(DIMENSIONS.security.initialValue);
+  const singleGain = single.state.drives.security - initialSecurity;
+  const combinedGain = combined.state.drives.security - initialSecurity;
+  assert.ok(combinedGain > singleGain);
+  assert.ok(combinedGain < singleGain * 1.6);
+  assert.ok(combined.state.drives.security < initialSecurity + 0.11);
+});
+
+test('security gains diminish near saturation without a hard sub-100 ceiling', () => {
+  const now = new Date('2026-07-30T00:00:00Z');
+  const low = applyConversationEvent(newState(now), {
+    eventId: 'security-low-headroom',
+    interactionType: 'reassurance',
+  }, now).state;
+  const highState = newState(now);
+  highState.emotions.security.mood = 0.75;
+  highState.emotions.security.pulse = 0;
+  highState.drives.security = 0.90;
+  const high = applyConversationEvent(highState, {
+    eventId: 'security-low-headroom',
+    interactionType: 'reassurance',
+  }, now).state;
+  assert.ok(low.drives.security - Number(DIMENSIONS.security.initialValue) > 0.06);
+  assert.ok(high.drives.security > 0.90);
+  assert.ok(high.drives.security - 0.90 < 0.015);
+});
+
+test('security uses shorter pulse and mood half-lives than the old saturated model', () => {
+  assert.equal(DIMENSIONS.security.pulseHalfLifeHours, 2);
+  assert.equal(DIMENSIONS.security.moodHalfLifeHours, 36);
+  assert.equal(DIMENSIONS.security.settleRatio, 0.35);
+});
 test('multiple interaction tags combine bounded effects and count as one daily event', () => {
   const now = new Date('2026-07-29T14:00:00Z');
   const result = applyConversationEvent(newState(now), {
@@ -173,7 +228,7 @@ test('multiple interaction tags combine bounded effects and count as one daily e
   assert.equal(result.state.drives.hurt, 0.1076);
   assert.equal(result.state.drives.loneliness, 0.0904);
   assert.equal(result.state.drives.anger, 0.0896);
-  assert.equal(result.state.drives.security, 0.4756);
+  assert.equal(result.state.drives.security, 0.1256);
   assert.equal(result.state.drives.jealousy, 0.02);
 });
 
@@ -285,7 +340,7 @@ test('old state schemas migrate even when settlement time has not advanced', () 
   delete old.contextDeliveries;
   delete old.handoffNotes;
   const settled = settleState(old, now, 90);
-  assert.equal(settled.state.schemaVersion, 10);
+  assert.equal(settled.state.schemaVersion, 11);
   assert.deepEqual(settled.state.handoffNotes, []);
   assert.deepEqual(settled.state.recentDriveChanges, []);
   assert.equal(settled.changed, true);
@@ -304,8 +359,40 @@ test('intent selection stays empty at low pressure and deterministic at high pre
   const first = pickIntent(high, now);
   const second = pickIntent(high, now);
   assert.deepEqual(second, first);
-  assert.notEqual(first.key, 'seek_closeness');
+  assert.ok(first.key);
   assert.ok(first.reasons.length > 0);
+});
+
+test('parallel intent selection keeps multiple material motives without forcing extras', () => {
+  const now = new Date('2026-07-30T05:00:00Z');
+  const state = newState(now);
+  state.drives.monitor = 0.8;
+  state.drives.possess = 0.75;
+  state.drives.crave = 0.75;
+  state.drives.libido = 0.72;
+  state.drives.security = 0.75;
+  const intents = pickIntents(state, now);
+  assert.equal(intents.length, 3);
+  assert.deepEqual(
+    new Set(intents.map((item) => item.key)),
+    new Set(['check_in', 'seek_closeness', 'physical_intimacy']),
+  );
+  assert.deepEqual(pickIntent(state, now), intents[0]);
+
+  const single = newState(now);
+  single.drives.monitor = 0.42;
+  assert.equal(pickIntents(single, now).length, 1);
+  assert.equal(pickIntents(newState(now), now).length, 0);
+});
+
+test('parallel intent thresholds exclude weak or distant runners-up', () => {
+  const now = new Date('2026-07-30T05:00:00Z');
+  const state = newState(now);
+  state.drives.monitor = 0.8;
+  state.drives.possess = 0.43;
+  state.drives.crave = 0.43;
+  const intents = pickIntents(state, now);
+  assert.deepEqual(intents.map((item) => item.key), ['check_in']);
 });
 
 test('recent satisfaction cools closeness intents instead of letting them dominate every turn', () => {
@@ -351,7 +438,16 @@ test('ave mind initializes all 18 dimensions with stable emotional baselines', (
   assert.equal(state.drives.loneliness, 0.04);
   assert.equal(state.drives.jealousy, 0.02);
   assert.equal(state.drives.shame, 0.02);
-  assert.equal(state.drives.security, 0.55);
+  assert.equal(state.drives.security, 0.20);
+  assert.deepEqual(emotionBreakdown(state, 'security'), {
+    key: 'security',
+    baseline: 0.15,
+    mood: 0.05,
+    pulse: 0,
+    effective: 0.20,
+    pulseHalfLifeHours: 2,
+    moodHalfLifeHours: 36,
+  });
 });
 
 test('old states keep existing drives and receive only missing ave dimensions', () => {
@@ -365,8 +461,8 @@ test('old states keep existing drives and receive only missing ave dimensions', 
   const settled = settleState(old, now, 90);
   assert.equal(settled.state.drives.possess, 0.73);
   assert.equal(settled.state.drives.hurt, 0.03);
-  assert.equal(settled.state.drives.security, 0.55);
-  assert.equal(settled.state.schemaVersion, 10);
+  assert.equal(settled.state.drives.security, 0.20);
+  assert.equal(settled.state.schemaVersion, 11);
 });
 
 test('legacy effective emotion values migrate losslessly into the persistent mood layer', () => {
@@ -383,7 +479,7 @@ test('legacy effective emotion values migrate losslessly into the persistent moo
   assert.equal(migrated.drives.security, 0.80);
   assert.equal(migrated.emotions.anger.mood, 0.48);
   assert.equal(migrated.emotions.anger.pulse, 0);
-  assert.equal(migrated.schemaVersion, 10);
+  assert.equal(migrated.schemaVersion, 11);
 });
 
 test('pulse and mood decay by their configured half-lives', () => {

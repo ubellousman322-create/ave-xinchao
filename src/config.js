@@ -110,6 +110,17 @@ export function loadConfig() {
       dawnFreezeStart: number('DAWN_FREEZE_START', 1, 0, 12),
       dawnFreezeEnd: number('DAWN_FREEZE_END', 8, 1, 12),
     },
+    proactive: {
+      enabled: bool('PROACTIVE_DELIVERY_ENABLED', true),
+      leaseMinutes: number('PROACTIVE_LEASE_MINUTES', 20, 1, 30),
+      maxPerDay: number('PROACTIVE_MAX_PER_DAY', 3, 1, 12),
+      intentMinScore: number('PROACTIVE_INTENT_MIN_SCORE', 0.72, 0.1, 1),
+      intentMinIdleHours: number('PROACTIVE_INTENT_MIN_IDLE_HOURS', 2, 0.25, 72),
+      globalMinIntervalHours: number('PROACTIVE_GLOBAL_MIN_INTERVAL_HOURS', 3, 0.25, 168),
+      starvationAfterHours: number('PROACTIVE_STARVATION_AFTER_HOURS', 24, 6, 168),
+      starvationMinScore: number('PROACTIVE_STARVATION_MIN_SCORE', 0.60, 0.1, 1),
+      starvationMinIdleHours: number('PROACTIVE_STARVATION_MIN_IDLE_HOURS', 2, 0.25, 72),
+    },
     daytime: {
       enabled: bool('DAYTIME_EMERGENCE_ENABLED', false),
       timeZone: process.env.DAYTIME_TIME_ZONE ?? 'Asia/Shanghai',

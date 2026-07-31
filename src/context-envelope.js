@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { breathDreamContext, emotionBreakdown, pickIntent } from './engine.js';
+import { breathDreamContext, emotionBreakdown, pickIntents } from './engine.js';
 import { DIMENSIONS } from './dimensions.js';
 import { renderHandoffNotes } from './handoff-notes.js';
 
@@ -166,10 +166,15 @@ export function composeStateSummary(state, now = new Date()) {
 
   const primary = [];
   if (candidates[0]) primary.push(candidates[0]);
-  const differentGroup = candidates.find((item) => !primary.some((chosen) => chosen.key === item.key)
-    && !primary.some((chosen) => chosen.group === item.group));
-  if (differentGroup) primary.push(differentGroup);
-  else if (candidates[1]) primary.push(candidates[1]);
+  const strongestEmotion = candidates.find((item) => item.group.startsWith('emotion_'));
+  if (strongestEmotion && !primary.some((chosen) => chosen.key === strongestEmotion.key)) {
+    primary.push(strongestEmotion);
+  } else {
+    const differentGroup = candidates.find((item) => !primary.some((chosen) => chosen.key === item.key)
+      && !primary.some((chosen) => chosen.group === item.group));
+    if (differentGroup) primary.push(differentGroup);
+    else if (candidates[1]) primary.push(candidates[1]);
+  }
   const secondary = candidates
     .filter((item) => !primary.some((chosen) => chosen.key === item.key))
     .slice(0, 2);
@@ -177,8 +182,10 @@ export function composeStateSummary(state, now = new Date()) {
     .filter((item) => Math.abs(item.delta) >= 0.015)
     .sort((left, right) => Math.abs(right.delta) - Math.abs(left.delta))
     .slice(0, 4);
+  const intents = pickIntents(state, now);
   return {
-    intent: pickIntent(state, now),
+    intent: intents[0] ?? null,
+    intents,
     primary,
     secondary,
     significantChanges,
@@ -201,7 +208,11 @@ function renderDynamic(value) {
     if (!item.layer) return `${item.label}=${item.value.toFixed(3)}`;
     return `${item.label}=${item.value.toFixed(3)}（持续${item.mood >= 0 ? '+' : ''}${item.mood.toFixed(3)}，瞬时${item.pulse >= 0 ? '+' : ''}${item.pulse.toFixed(3)}；${item.trend}）`;
   };
-  const intent = value.summary.intent;
+  const intents = Array.isArray(value.summary.intents)
+    ? value.summary.intents
+    : (value.summary.intent ? [value.summary.intent] : []);
+  const intent = intents[0] ?? null;
+  const parallelIntents = intents.slice(1);
   const interactionTrace = value.interactionWindow
     .map((event) => event.types.map((type) => INTERACTION_LABELS[type]).join('+'))
     .join(' → ');
@@ -209,6 +220,9 @@ function renderDynamic(value) {
     `意识=${value.consciousness}`,
     `疲劳=${value.fatigue.toFixed(3)}`,
     intent ? `当前意图：${intent.label} score=${intent.score.toFixed(3)}${intent.reasons.length ? `（${intent.reasons.join('；')}）` : ''}` : '当前意图：暂无主导意图',
+    parallelIntents.length
+      ? `并行意图：${parallelIntents.map((item) => `${item.label} score=${item.score.toFixed(3)}`).join('；')}`
+      : '',
     value.summary.primary.length ? `主导状态：${value.summary.primary.map(formatState).join('；')}` : '',
     value.summary.secondary.length ? `次要状态：${value.summary.secondary.map(formatState).join('；')}` : '',
     value.summary.significantChanges.length

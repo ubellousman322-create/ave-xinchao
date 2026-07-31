@@ -7,6 +7,8 @@ const iso = (value) => new Date(value).toISOString();
 const SESSION_TONES = new Set(['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired']);
 const SESSION_FIELDS = ['warmth', 'tension', 'attention', 'confidence'];
 const MAX_RECENT_CONVERSATION_EVENTS = 256;
+const CURRENT_SCHEMA_VERSION = 11;
+const THOUGHT_TICK_MINUTES = 15;
 export const EMOTION_KEYS = Object.freeze(
   DRIVE_KEYS.filter((key) => DIMENSIONS[key].group?.startsWith('emotion_')),
 );
@@ -107,7 +109,7 @@ const INTERACTION_EFFECTS = Object.freeze({
     boost: { security: 0.025 },
   },
   discovery: { relief: { curiosity: 0.15, boredom: 0.12 } },
-  task_progress: { relief: { duty: 0.15 }, boost: { security: 0.02 } },
+  task_progress: { relief: { duty: 0.15 } },
   reflection: { relief: { reflection: 0.15, anxiety: 0.04, shame: 0.03 } },
   conflict: {
     increase: { anger: 0.07, grieve: 0.02, hurt: 0.05, anxiety: 0.03 },
@@ -176,6 +178,11 @@ function ensureStateShape(state) {
     };
   }
   syncEffectiveEmotions(state);
+  state.thoughtPool ??= newThoughtPool();
+  state.lastThoughtTickAt = Number.isFinite(Date.parse(state.lastThoughtTickAt ?? ''))
+    ? state.lastThoughtTickAt
+    : (state.lastSettledAt ?? new Date().toISOString());
+  state.saturatedDrives ??= {};
   state.sessionOverlays ??= {};
   state.contextDeliveries ??= {};
   state.recentConversationEvents = Array.isArray(state.recentConversationEvents)
@@ -186,7 +193,7 @@ function ensureStateShape(state) {
     ? state.recentDriveChanges.slice(-32)
     : [];
   state.handoffNotes = Array.isArray(state.handoffNotes) ? state.handoffNotes : [];
-  state.schemaVersion = Math.max(10, Number(state.schemaVersion) || 0);
+  state.schemaVersion = Math.max(CURRENT_SCHEMA_VERSION, Number(state.schemaVersion) || 0);
   return state;
 }
 
@@ -299,6 +306,7 @@ function applyInteractionOutcomes(state, tags, now, options = {}) {
   }
 
   const affected = new Set();
+  const securityBoosts = [];
   const repeatWindowMs = clamp(Number(options.repeatWindowMinutes ?? 30), 1, 1440) * 60_000;
   const repeatDecay = clamp(Number(options.repeatDecay ?? 0.75), 0.1, 1);
   const repeatFloor = clamp(Number(options.repeatFloor ?? 0.40), 0.05, 1);
@@ -340,11 +348,28 @@ function applyInteractionOutcomes(state, tags, now, options = {}) {
     }
     for (const [key, boost] of Object.entries(effect.boost ?? {})) {
       if (!DRIVE_KEYS.includes(key)) continue;
-      const current = Number(state.drives[key] ?? 0);
       const amount = clamp(Number(boost) * strength, 0, 0.12);
+      if (key === 'security' && isEmotion(key)) {
+        securityBoosts.push(amount);
+        continue;
+      }
+      const current = Number(state.drives[key] ?? 0);
       if (isEmotion(key)) addEmotionImpulse(state, key, amount);
       else state.drives[key] = Number(clamp(current + amount).toFixed(4));
       affected.add(key);
+    }
+  }
+  if (securityBoosts.length > 0) {
+    const sorted = securityBoosts.sort((left, right) => right - left);
+    const combined = sorted[0] + sorted.slice(1).reduce((sum, value) => sum + value * 0.25, 0);
+    const current = Number(state.drives.security ?? DIMENSIONS.security.baseline ?? 0.5);
+    const baseline = Number(DIMENSIONS.security.baseline ?? 0.5);
+    const remainingRatio = clamp((1 - current) / Math.max(0.01, 1 - baseline), 0, 1);
+    const diminishingMultiplier = remainingRatio ** 1.35;
+    const amount = clamp(combined * diminishingMultiplier, 0, 0.12);
+    if (amount > 0) {
+      addEmotionImpulse(state, 'security', amount);
+      affected.add('security');
     }
   }
   state.interactionUsage[day] = used + 1;
@@ -401,7 +426,7 @@ function applySessionOverlay(state, event, now) {
 export function newState(now = new Date()) {
   const at = iso(now);
   return {
-    schemaVersion: 10,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     revision: 0,
     consciousness: 'awake',
     lastConversationAt: at,
@@ -418,6 +443,8 @@ export function newState(now = new Date()) {
       }]),
     ),
     thoughtPool: newThoughtPool(),
+    lastThoughtTickAt: at,
+    saturatedDrives: {},
     fatigue: 0,
     recentDreams: [],
     dreamUsage: {},
@@ -426,6 +453,9 @@ export function newState(now = new Date()) {
     lastAutonomousBarkAt: null,
     barkUsage: {},
     recentBarkMessages: [],
+    proactiveDelivery: null,
+    proactiveStartedAt: null,
+    lastProactiveAck: null,
     lastDreamPushMessage: null,
     lastAutonomousMessage: null,
     lastDaytimeEmergenceAt: null,
@@ -553,23 +583,45 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
       state.emotions[key].pulse = Number((Number(state.emotions[key].pulse) * pulseFactor).toFixed(4));
       state.emotions[key].mood = Number((Number(state.emotions[key].mood) * moodFactor).toFixed(4));
       next = effectiveEmotion(state, key);
-    } else if (current >= SATURATE_CEIL) {
-      const decay = (current - SATURATE_FLOOR) * 0.10 * elapsedHours;
-      next = clamp(Math.max(SATURATE_FLOOR, current - decay));
     } else {
-      let rate = dim.growPerHour;
-      if (isNight && dim.nightMul !== undefined) rate *= dim.nightMul;
-      rate *= fatigueMultiplier;
-      next = Math.min(clamp(current + rate * elapsedHours), SATURATE_CEIL);
+      if (current >= SATURATE_CEIL) state.saturatedDrives[key] = true;
+      if (state.saturatedDrives[key]) {
+        if (current <= SATURATE_FLOOR) {
+          next = current;
+          delete state.saturatedDrives[key];
+        } else {
+          const decay = (current - SATURATE_FLOOR) * 0.10 * elapsedHours;
+          next = clamp(Math.max(SATURATE_FLOOR, current - decay));
+          if (next <= SATURATE_FLOOR + 0.001) {
+            next = SATURATE_FLOOR;
+            delete state.saturatedDrives[key];
+          }
+        }
+      } else {
+        let rate = dim.growPerHour;
+        if (isNight && dim.nightMul !== undefined) rate *= dim.nightMul;
+        rate *= fatigueMultiplier;
+        next = Math.min(clamp(current + rate * elapsedHours), SATURATE_CEIL);
+        if (next >= SATURATE_CEIL) state.saturatedDrives[key] = true;
+      }
     }
 
     if (next !== current) changed = true;
     state.drives[key] = Number(next.toFixed(4));
   }
 
-  // Tick thought pool
+  // Advance the thought pool by real 15-minute quanta, including downtime catch-up.
   state.thoughtPool ??= newThoughtPool();
-  const feedbacks = tickThoughtPool(state.thoughtPool);
+  const lastThoughtTickMs = Date.parse(state.lastThoughtTickAt ?? state.lastSettledAt);
+  const thoughtTickMs = THOUGHT_TICK_MINUTES * 60_000;
+  const thoughtTicks = Number.isFinite(lastThoughtTickMs)
+    ? Math.max(0, Math.floor((nowMs - lastThoughtTickMs) / thoughtTickMs))
+    : 0;
+  const feedbacks = tickThoughtPool(state.thoughtPool, thoughtTicks);
+  if (thoughtTicks > 0) {
+    state.lastThoughtTickAt = iso(new Date(lastThoughtTickMs + thoughtTicks * thoughtTickMs));
+    changed = true;
+  }
   for (const [key, amount] of Object.entries(feedbacks)) {
     if (DRIVE_KEYS.includes(key)) {
       const before = Number(state.drives[key]);
@@ -583,7 +635,9 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
   if (state.consciousness === 'sleeping') {
     state.fatigue = Number(clamp(Number(state.fatigue ?? 0) - 0.02 * elapsedHours, 0, 0.3).toFixed(4));
   } else {
-    const avgDrive = DRIVE_KEYS.reduce((sum, k) => sum + Number(state.drives[k]), 0) / DRIVE_KEYS.length;
+    // Emotion baselines must not dilute fatigue pressure; only naturally growing drives count.
+    const fatigueKeys = DRIVE_KEYS.filter((key) => !isEmotion(key));
+    const avgDrive = fatigueKeys.reduce((sum, key) => sum + Number(state.drives[key]), 0) / fatigueKeys.length;
     if (avgDrive > 0.5) {
       state.fatigue = Number(clamp(Number(state.fatigue ?? 0) + 0.005 * elapsedHours, 0, 0.3).toFixed(4));
     }
@@ -692,6 +746,11 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   for (const key of DRIVE_KEYS) {
     const delta = Number((Number(state.drives[key]) - Number(drivesBefore[key] ?? 0)).toFixed(4));
     if (Math.abs(delta) >= 0.0001) driveChanges[key] = delta;
+  }
+  for (const key of DRIVE_KEYS) {
+    if (!isEmotion(key) && Number(state.drives[key]) < Number(drivesBefore[key] ?? 0)) {
+      delete state.saturatedDrives[key];
+    }
   }
   if (eventId && Object.keys(driveChanges).length > 0) {
     state.recentDriveChanges = [
@@ -823,9 +882,9 @@ function emotionIntentAdjustment(state, key) {
   return Number(adjustments[key] ?? 0);
 }
 
-export function pickIntent(state, now = new Date()) {
+export function rankIntents(state, now = new Date()) {
   const pool = state.thoughtPool ?? newThoughtPool();
-  const candidates = Object.entries(INTENT_DEFINITIONS).map(([key, definition]) => {
+  return Object.entries(INTENT_DEFINITIONS).map(([key, definition]) => {
     let pressure = 0;
     const reasons = [];
     for (const [driveKey, weight] of Object.entries(definition.drives)) {
@@ -848,12 +907,54 @@ export function pickIntent(state, now = new Date()) {
       reasons: [...new Set(reasons)].slice(0, 3),
     };
   }).sort((left, right) => right.score - left.score || left.key.localeCompare(right.key));
-
-  const winner = candidates[0];
-  if (!winner || winner.score < 0.24) return null;
-  return winner;
 }
 
+function stableIntentRoll(state) {
+  const source = `${state.revision ?? 0}:${state.lastSettledAt ?? ''}:${state.lastConversationAt ?? ''}`;
+  const digest = createHash('sha256').update(source, 'utf8').digest();
+  return digest.readUInt32BE(0) / 0x1_0000_0000;
+}
+function weightedIntentChoice(candidates, roll) {
+  const total = candidates.reduce((sum, candidate) => sum + Math.max(0.0001, candidate.score), 0);
+  let cursor = clamp(Number(roll), 0, 0.999999999999) * total;
+  for (const candidate of candidates) {
+    cursor -= Math.max(0.0001, candidate.score);
+    if (cursor <= 0) return candidate;
+  }
+  return candidates.at(-1) ?? null;
+}
+export function pickIntents(state, now = new Date(), options = {}) {
+  const candidates = rankIntents(state, now);
+  const primaryMinScore = clamp(Number(options.primaryMinScore ?? 0.24), 0, 1);
+  const parallelMinScore = clamp(Number(options.parallelMinScore ?? 0.28), 0, 1);
+  const parallelMinRatio = clamp(Number(options.parallelMinRatio ?? 0.70), 0, 1);
+  const parallelMaxGap = clamp(Number(options.parallelMaxGap ?? 0.18), 0, 1);
+  const competitionGap = clamp(Number(options.competitionGap ?? 0.12), 0, 1);
+  const limit = Math.trunc(clamp(Number(options.limit ?? 3), 1, 5));
+  const strongest = candidates[0];
+  if (!strongest || strongest.score < primaryMinScore) return [];
+  const competition = candidates.filter((candidate) => (
+    candidate.score >= primaryMinScore
+    && strongest.score - candidate.score <= competitionGap
+  ));
+  const roll = typeof options.random === 'function' ? options.random() : stableIntentRoll(state);
+  const primary = weightedIntentChoice(competition, roll) ?? strongest;
+  const parallel = candidates.filter((candidate) => candidate.key !== primary.key && (
+    candidate.score >= parallelMinScore
+    && candidate.score >= strongest.score * parallelMinRatio
+    && strongest.score - candidate.score <= parallelMaxGap
+  ));
+  return [primary, ...parallel].filter((candidate, index, items) => (
+    items.findIndex((item) => item.key === candidate.key) === index
+  )).slice(0, limit);
+}
+export function pickIntent(state, now = new Date(), random = null) {
+  if (typeof now === 'function') {
+    random = now;
+    now = new Date();
+  }
+  return pickIntents(state, now, { limit: 1, random })[0] ?? null;
+}
 // ── Heartbeat / idle ──────────────────────────────────────────────
 
 export function applyOmbreHeartbeat(input, now = new Date()) {
@@ -876,7 +977,11 @@ export function applyDriveFeedback(input, feedback = {}, now = new Date()) {
   for (const [key, delta] of Object.entries(feedback)) {
     if (DRIVE_KEYS.includes(key) && Number.isFinite(Number(delta))) {
       if (isEmotion(key)) addEmotionImpulse(state, key, Number(delta));
-      else state.drives[key] = Number(clamp(Number(state.drives[key]) + Number(delta)).toFixed(4));
+      else {
+        const before = Number(state.drives[key]);
+        state.drives[key] = Number(clamp(before + Number(delta)).toFixed(4));
+        if (state.drives[key] < before) delete state.saturatedDrives[key];
+      }
     }
   }
   state.lastSettledAt = iso(now);

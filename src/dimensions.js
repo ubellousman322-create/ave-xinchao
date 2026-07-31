@@ -115,8 +115,8 @@ export const DIMENSIONS = Object.freeze({
     growPerHour: 0, satisfyMul: 0.50, dawnFreeze: false,
   },
   security: {
-    label: '安心与信任', group: 'emotion_positive', initialValue: 0.55,
-    baseline: 0.50, pulseHalfLifeHours: 4, moodHalfLifeHours: 120, settleRatio: 0.45,
+    label: '安心与信任', group: 'emotion_positive', initialValue: 0.20,
+    baseline: 0.15, pulseHalfLifeHours: 2, moodHalfLifeHours: 36, settleRatio: 0.35,
     growPerHour: 0, satisfyMul: 0.85, dawnFreeze: false,
   },
 });

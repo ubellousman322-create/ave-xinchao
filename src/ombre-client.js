@@ -2,6 +2,7 @@ export class OmbreClient {
   constructor(config) {
     this.config = config;
     this.sessionId = null;
+    this.initialized = false;
     this.initializePromise = null;
   }
 
@@ -26,7 +27,7 @@ export class OmbreClient {
   }
 
   async initialize() {
-    if (this.sessionId) return;
+    if (this.initialized) return;
     if (!this.initializePromise) {
       this.initializePromise = (async () => {
         await this.post({
@@ -39,8 +40,8 @@ export class OmbreClient {
             clientInfo: { name: 'xinchao-dynamic-mind', version: '2.3.1' },
           },
         });
-        if (!this.sessionId) throw new Error('Ombre MCP did not return a session id');
         await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, false);
+        this.initialized = true;
       })().finally(() => { this.initializePromise = null; });
     }
     return this.initializePromise;
@@ -54,6 +55,7 @@ export class OmbreClient {
       } catch (error) {
         if (attempt || !/HTTP (400|404)/.test(error.message)) throw error;
         this.sessionId = null;
+        this.initialized = false;
       }
     }
     throw new Error('Ombre MCP call failed after session refresh');

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { loadConfig } from './config.js';
-import { applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
+import { applyDriveFeedback, applyOmbreHeartbeat, barkAllowed, breathDreamContext, contactIdleAllowed, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntents, proactiveBarkAllowed, recentBarkHistory, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives } from './engine.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
 import { ModelClient } from './model-client.js';
@@ -13,12 +13,18 @@ import { TransitionJournal } from './transition-journal.js';
 import { handleMcpMessage } from './mcp-protocol.js';
 import { OAuthProvider } from './oauth-provider.js';
 import { recordHandoffNote } from './handoff-notes.js';
+import { runtimeModelConfig, runtimeModelFingerprint, runtimeModelSafeStatus } from './runtime-model-config.js';
+import { ackProactiveDelivery, finalizeProactiveDelivery, proactiveDeliveryStatus, proactiveOptions, reserveProactiveDelivery } from './proactive-delivery.js';
 
 const config = loadConfig();
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
 
 const store = new StateStore(config.statePath, () => newState());
-const model = new ModelClient(config.model);
+let modelConfig = config.model;
+let model = new ModelClient(modelConfig);
+let runtimeModelSource = modelConfig.enabled && modelConfig.apiKey ? 'environment' : 'disabled';
+let runtimeModelSyncedAt = runtimeModelSource === 'environment' ? new Date().toISOString() : null;
+let runtimeModelConfigFingerprint = runtimeModelFingerprint(modelConfig);
 const interactionClassifier = new ModelClient(config.interactionClassifier);
 const ombre = new OmbreClient(config.ombre);
 const bark = new BarkClient(config.bark);
@@ -460,6 +466,118 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
   };
 }
 
+const proactiveConfig = proactiveOptions(config);
+
+async function generateProactiveCandidate(delivery, state) {
+  const recentMessages = recentBarkHistory(state);
+  if (delivery.kind === 'dream') {
+    const dream = state.recentDreams?.find((item) => item.id === delivery.trigger.dreamId);
+    if (!dream) return { send: false, message: '', source: 'missing_dream' };
+    let modelFailed = false;
+    const selected = await selectUniqueBark({
+      state,
+      generate: async ({ rejectedMessage }) => {
+        if (modelFailed) return dream.residue;
+        try {
+          return await model.generateDreamPush({ dream, recentMessages, rejectedMessage });
+        } catch (error) {
+          modelFailed = true;
+          log('proactive_dream_model_failed', { message: error.message });
+          return dream.residue;
+        }
+      },
+    });
+    return selected.message ? { message: selected.message, source: selected.candidate?.source ?? 'model' } : { send: false, message: '', source: selected.reason ?? 'empty' };
+  }
+  if (delivery.kind === 'autonomous_thought') {
+    const intent = delivery.trigger.intent;
+    let modelFailed = false;
+    const selected = await selectUniqueBark({
+      state,
+      generate: async ({ rejectedMessage }) => {
+        if (modelFailed) return new ModelClient({ ...modelConfig, enabled: false }).fallbackThought(topDrives(state));
+        try {
+          return await model.generateThought({ state, topDrives: topDrives(state), recentMessages, rejectedMessage });
+        } catch (error) {
+          modelFailed = true;
+          log('proactive_thought_model_failed', { intent: intent?.key, message: error.message });
+          return new ModelClient({ ...modelConfig, enabled: false }).fallbackThought(topDrives(state));
+        }
+      },
+    });
+    return selected.message ? { message: selected.message, source: selected.candidate?.source ?? 'model' } : { send: false, message: '', source: selected.reason ?? 'empty' };
+  }
+  if (delivery.kind === 'daytime_emergence') {
+    const material = await ombre.daytimeMaterial();
+    if (!material.trim()) return { send: false, message: '', source: 'no_pushworthy_material' };
+    const selected = await selectUniqueBark({
+      state,
+      generate: ({ rejectedMessage }) => model.generateDaytimeEmergence({ material, recentMessages, rejectedMessage }),
+    });
+    return selected.message ? { message: selected.message, source: selected.candidate?.source ?? 'model' } : { send: false, message: '', source: selected.reason ?? 'empty' };
+  }
+  return { send: false, message: '', source: 'unknown_kind' };
+}
+
+async function pollProactiveDelivery(now = new Date()) {
+  await runCycle();
+  let reservation;
+  let state;
+  await updateState({ type: 'proactive_poll', source: 'operit', at: now }, (current) => {
+    reservation = reserveProactiveDelivery(current, now, proactiveConfig);
+    state = reservation.state;
+    return state;
+  });
+  if (reservation.action === 'send') {
+    return { action: 'send', reason: reservation.reason, delivery: reservation.delivery };
+  }
+  if (reservation.action === 'skip' || reservation.action === 'busy') {
+    return { action: 'skip', reason: reservation.reason, delivery: null };
+  }
+  try {
+    const candidate = await generateProactiveCandidate(reservation.delivery, state);
+    let finalized;
+    await updateState({
+      type: 'proactive_candidate',
+      source: 'model',
+      details: { kind: reservation.delivery.kind, candidateSource: candidate.source ?? null },
+      at: now,
+    }, (current) => {
+      finalized = finalizeProactiveDelivery(current, reservation.delivery.deliveryId, candidate, new Date());
+      return finalized.state;
+    });
+    return { action: finalized.action, reason: finalized.reason ?? null, delivery: finalized.delivery ?? null };
+  } catch (error) {
+    let released;
+    await updateState({ type: 'proactive_candidate_failed', source: 'model', at: now, details: { message: error.message } }, (current) => {
+      released = finalizeProactiveDelivery(current, reservation.delivery.deliveryId, { send: false, message: '', source: 'error' }, new Date());
+      return released.state;
+    });
+    log('proactive_candidate_failed', { kind: reservation.delivery.kind, message: error.message });
+    return { action: 'skip', reason: 'candidate_generation_failed', delivery: null };
+  }
+}
+
+async function ackProactiveDeliveryRequest(payload, now = new Date()) {
+  let applied;
+  const state = await updateState({
+    type: 'proactive_ack',
+    source: 'operit',
+    eventId: auditEventFingerprint(payload.deliveryId),
+    details: { delivered: payload.delivered === true },
+    at: now,
+  }, (current) => {
+    applied = ackProactiveDelivery(current, payload.deliveryId, payload.delivered === true, now, {
+      timeZone: config.daytime.timeZone,
+      deliveredMessage: payload.message,
+      daytimeMinIntervalHours: config.daytime.minIntervalHours,
+      daytimeMaxIntervalHours: config.daytime.maxIntervalHours,
+    });
+    return applied.state;
+  });
+  return { ...applied, revision: state.revision, delivery: proactiveDeliveryStatus(state, now) };
+}
+
 async function saveHandoffNote(note, source = 'mcp', now = new Date()) {
   let applied;
   const state = await updateState({
@@ -492,6 +610,7 @@ const server = createServer(async (request, response) => {
         system: 'xinchao-dynamic-mind',
         mode: config.shadowMode ? 'shadow' : 'active',
         version: '2.3.1',
+        proactiveDelivery: config.proactive.enabled ? 'poll_ack' : 'disabled',
       });
     }
     if (await oauth.handle(request, response, url)) return;
@@ -547,6 +666,54 @@ const server = createServer(async (request, response) => {
     }
     if (!authorized(request)) return send(response, 401, { error: 'unauthorized' });
 
+    if (request.method === 'GET' && url.pathname === '/v1/runtime-model') {
+      return send(response, 200, runtimeModelSafeStatus(modelConfig, runtimeModelSource, runtimeModelSyncedAt));
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/runtime-model/test') {
+      if (!modelConfig.enabled || !modelConfig.apiKey) return send(response, 503, { ok: false, error: 'runtime model disabled' });
+      try {
+        const generated = await model.generateDream({
+          state: { consciousness: 'awake' },
+          material: '',
+          topDrives: [],
+        });
+        return send(response, 200, {
+          ok: generated.source === 'model',
+          source: generated.source,
+          model: generated.model ?? modelConfig.name,
+          outputPresent: Boolean(generated.dream || generated.residue || generated.awareness),
+        });
+      } catch (error) {
+        log('runtime_model_test_failed', { model: modelConfig.name, message: error.message });
+        return send(response, 502, { ok: false, error: 'runtime model test failed', model: modelConfig.name });
+      }
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/runtime-model') {
+      const payload = await body(request);
+      const next = runtimeModelConfig(payload, {
+        dreamPushPromptPath: config.model.dreamPushPromptPath,
+        agentName: config.identity.agentName,
+        notificationRecipient: config.identity.notificationRecipient,
+      });
+      const nextFingerprint = runtimeModelFingerprint(next);
+      const changed = nextFingerprint !== runtimeModelConfigFingerprint;
+      modelConfig = next ?? { ...config.model, enabled: false, apiKey: '' };
+      model = new ModelClient(modelConfig);
+      runtimeModelConfigFingerprint = nextFingerprint;
+      runtimeModelSource = next ? 'bridge' : 'disabled';
+      runtimeModelSyncedAt = next ? new Date().toISOString() : null;
+      log('runtime_model_updated', {
+        configured: Boolean(next),
+        source: runtimeModelSource,
+        model: next?.name ?? null,
+        changed,
+      });
+      return send(response, 200, {
+        ...runtimeModelSafeStatus(modelConfig, runtimeModelSource, runtimeModelSyncedAt),
+        changed,
+      });
+    }
+
     if (request.method === 'GET' && url.pathname === '/v1/state') {
       return send(response, 200, await store.read());
     }
@@ -575,8 +742,25 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/v1/intent') {
       const state = await store.read();
-      const intent = pickIntent(state);
-      return send(response, 200, { intent, topDrives: topDrives(state), thoughtPool: state.thoughtPool ?? null, fatigue: state.fatigue ?? 0 });
+      const intents = pickIntents(state);
+      return send(response, 200, {
+        intent: intents[0] ?? null,
+        intents,
+        topDrives: topDrives(state),
+        thoughtPool: state.thoughtPool ?? null,
+        fatigue: state.fatigue ?? 0,
+      });
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/proactive/poll') {
+      return send(response, 200, await pollProactiveDelivery(new Date()));
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/proactive/ack') {
+      const payload = await body(request);
+      return send(response, 200, await ackProactiveDeliveryRequest(payload, new Date()));
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/proactive/status') {
+      const state = await store.read();
+      return send(response, 200, { delivery: proactiveDeliveryStatus(state, new Date()), revision: state.revision });
     }
     if (request.method === 'POST' && url.pathname === '/v1/settle') {
       const result = await runCycle();
@@ -625,7 +809,7 @@ const server = createServer(async (request, response) => {
 
 server.listen(config.port, '0.0.0.0', async () => {
   await store.read();
-  log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: config.model.enabled, barkEnabled: config.bark.enabled });
+  log('service_started', { port: config.port, shadow: config.shadowMode, modelEnabled: Boolean(modelConfig.enabled && modelConfig.apiKey), barkEnabled: config.bark.enabled });
 });
 
 const timer = setInterval(() => runCycle().catch((error) => log('cycle_failed', { message: error.message })), config.settleIntervalMinutes * 60_000);

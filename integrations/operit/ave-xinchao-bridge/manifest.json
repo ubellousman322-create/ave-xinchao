@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "ave-xinchao-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0-dev.4",
   "main": "dist/main.js",
   "display_name": {
     "zh": "ave 心潮桥接",
@@ -12,5 +12,12 @@
     "en": "Per-turn context injection and idempotent interaction feedback bridge for ave-xinchao."
   },
   "enabled_by_default": false,
-  "subpackages": []
+  "subpackages": [],
+  "resources": [
+    {
+      "key": "dashboard_starfield",
+      "path": "resources/dashboard/starfield.jpg",
+      "mime": "image/jpeg"
+    }
+  ]
 }

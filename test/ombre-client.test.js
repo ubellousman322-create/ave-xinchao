@@ -29,3 +29,27 @@ test('automatic dream writes identify themselves and never impersonate manual me
   assert.equal(captured.args.importance, 7);
   assert.equal(captured.args.tags, 'dream');
 });
+
+
+test('stateless MCP servers initialize once without requiring a session header', async () => {
+  const client = new OmbreClient({
+    url: 'http://stateless.invalid/mcp',
+    token: '',
+    readEnabled: true,
+    writeEnabled: false,
+    breathMaxResults: 3,
+    breathMaxTokens: 800,
+  });
+  const calls = [];
+  client.post = async (payload) => {
+    calls.push(payload.method);
+    if (payload.method === 'initialize') return { result: { protocolVersion: '2025-06-18' } };
+    if (payload.method === 'tools/call') return { result: { content: [{ type: 'text', text: '近期材料' }] } };
+    return null;
+  };
+  assert.equal(await client.recentMaterial(), '近期材料');
+  assert.equal(await client.daytimeMaterial(), '近期材料');
+  assert.equal(calls.filter((method) => method === 'initialize').length, 1);
+  assert.equal(client.sessionId, null);
+  assert.equal(client.initialized, true);
+});

@@ -2,10 +2,11 @@
 
 该 ToolPkg 在 Operit 每次发送聊天前执行两步：
 
-1. 提取上一轮已完成的用户消息与最终 AI 回复，调用用户在私有配置页填写的 OpenAI-compatible 分类模型；
-2. 将清洗后的结构化互动标签幂等提交给心潮，再从 `/v1/context?mode=turn` 读取当前状态并注入本轮。
+1. 将私有配置页中的 OpenAI-compatible 模型同步到心潮进程内，供互动分类、模型梦境、主动念头和白天浮现共用；
+2. 提取上一轮已完成的用户消息与最终 AI 回复，调用该模型完成保守的互动分类；
+3. 将清洗后的结构化互动标签幂等提交给心潮，再从 `/v1/context?mode=turn` 读取当前状态并注入本轮。
 
-它不会把 API Key 写入聊天、源码、心潮状态或日志。桥接日志仅记录不透明轮次指纹、标签、Context digest、长度和 revision。
+它不会把 API Key 写入聊天、源码、`.env`、心潮状态或日志。Key 只从 Operit 私有设置经本机 Bearer 鉴权接口进入心潮进程内存；服务重启后由桥接自动重新同步。桥接日志仅记录不透明轮次指纹、标签、模型名、Context digest、长度和 revision。
 
 ## 安装前准备
 
@@ -16,30 +17,20 @@
 
 ## 构建与令牌注入
 
-源码中的 `__AVE_XINCHAO_SERVICE_TOKEN__` 必须保持为占位符并提交到 Git。编译后，只在本机构建产物 `dist/main.js` 中替换它：
+源码中的 `__AVE_XINCHAO_SERVICE_TOKEN__` 必须保持为占位符并提交到 Git。编译后，必须扫描并替换所有 `dist/**/*.js`；令牌目前会出现在主桥接、星图数据和运行时模型同步三个模块中，不能只处理 `dist/main.js`：
 
 ```bash
 npx tsc -p tsconfig.json
-python3 - <<'PY'
-from pathlib import Path
-import os
-p = Path('dist/main.js')
-token = os.environ['XINCHAO_SERVICE_TOKEN']
-text = p.read_text()
-marker = '__AVE_XINCHAO_SERVICE_TOKEN__'
-if marker not in text:
-    raise SystemExit('service token placeholder missing')
-p.write_text(text.replace(marker, token))
-PY
+XINCHAO_SERVICE_TOKEN=... node scripts/inject-service-token.mjs
 ```
 
-不要提交完成令牌注入后的 `dist/main.js`。当前公开目录中的构建产物仍保留占位符，只用于复现与审阅。
+注入脚本会遍历全部 `dist/**/*.js`，若没有发现占位符，或替换后仍有残留占位符，就直接失败。不要提交任何完成令牌注入后的 `dist/**/*.js`；公开构建产物只保留占位符用于复现与审阅。安装前还应再次断言所有运行模块的占位符计数为零。
 
-## 分类器配置
+## 心潮共用模型配置
 
 安装并启用 ToolPkg 后，在工具箱打开“ave 心潮桥接”：
 
-- 启用语义分类器；
+- 启用心潮共用模型；
 - 填写 OpenAI-compatible `/v1` 地址；
 - 在密码框填写 API Key；
 - 填写模型名、超时和最大输入字符数。
@@ -53,3 +44,18 @@ PY
 - Context 同时输出累计状态与当前 `session_id` 最近 15 分钟、最多 8 轮的标签轨迹；
 - 轨迹不保存聊天正文，超时后退出轨迹，但已经形成的持续状态仍保留；
 - 分类、结算或 Context 读取失败均 fail-open，不阻塞聊天发送，也不会在失败时擅自修改状态。
+
+## 心潮星图
+
+`0.3.0-dev.4` 的心潮星图采用低饱和私人深空观测站视觉：
+
+- 全局使用深蓝黑底色、稀疏星点和低透明度蓝紫雾光，不使用荧光霓虹、米白、橄榄绿或棕红大色块；
+- 中心星核只保留银灰核心、缓慢呼吸光晕与细轨道，不在光核内显示 `AVE`；
+- 关系与自主页面使用固定位置的星群，星点错峰缓慢波动，点击星点或读数行可高亮对应维度；
+- 情绪页面使用固定位置的情绪星图：基线是稳定星核，持续层是缓慢呼吸的星云，瞬时层是短暂扩散的光波；
+- 情绪星图下方保留当前值、基线、持续和瞬时四项观测读数，点击星点与读数行双向联动；
+- 最近 15 分钟互动按当前会话绘制克制的星轨，不保存聊天正文；
+- 技术卡显示 revision、schema、意识状态和更新时间；
+- 同时注册工具箱入口与主侧边栏插件入口“ave 心潮星图”。
+
+桥接在应用创建、回到前台、发送消息和打开星图时检查 `18111`。若服务离线，会从 `/root/ave-xinchao/.env` 使用隐藏终端执行器自愈启动；命令与日志不包含服务令牌。

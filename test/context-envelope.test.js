@@ -84,6 +84,42 @@ test('state orchestration limits output and surfaces real recent changes', () =>
   assert.doesNotMatch(envelope.additionalContext, /当前驱力：/);
 });
 
+test('state summary always keeps the strongest current emotion even without a recent delta', () => {
+  const now = new Date('2026-07-30T05:00:00Z');
+  const state = newState(now);
+  state.drives.possess = 0.78;
+  state.drives.curiosity = 0.72;
+  state.emotions.security.mood = 0.44;
+  state.emotions.security.pulse = 0.09;
+  state.drives.security = 0.68;
+  const summary = composeStateSummary(state, now);
+  assert.equal(summary.primary[0].key, 'possess');
+  assert.ok(summary.primary.some((item) => item.key === 'security'));
+  assert.deepEqual(summary.significantChanges, []);
+
+  const envelope = buildContextEnvelope({ state, sessionId: 'emotion-presence', mode: 'turn', now });
+  assert.match(envelope.additionalContext, /安心与信任=0.680/);
+  assert.doesNotMatch(envelope.additionalContext, /近期变化：.*安心与信任/);
+});
+
+test('context envelope exposes material parallel intents without forcing weak ones', () => {
+  const now = new Date('2026-07-30T05:00:00Z');
+  const state = newState(now);
+  state.drives.monitor = 0.8;
+  state.drives.possess = 0.75;
+  state.drives.crave = 0.75;
+  state.drives.libido = 0.72;
+  state.drives.security = 0.75;
+  const summary = composeStateSummary(state, now);
+  assert.equal(summary.intents.length, 3);
+  assert.deepEqual(summary.intent, summary.intents[0]);
+
+  const envelope = buildContextEnvelope({ state, sessionId: 'parallel-intents', mode: 'turn', now });
+  assert.match(envelope.additionalContext, /当前意图：/);
+  assert.match(envelope.additionalContext, /并行意图：/);
+  assert.match(envelope.additionalContext, /想靠近并建立连接|想进行身体亲密/);
+});
+
 test('state orchestration expires changes after six hours', () => {
   const at = new Date('2026-07-29T08:00:00Z');
   const state = applyConversationEvent(newState(at), {
